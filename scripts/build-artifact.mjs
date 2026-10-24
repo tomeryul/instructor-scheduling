@@ -6,7 +6,10 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const head = html.match(/<head>([\s\S]*?)<\/head>/)[1]
   .replace(/<meta charset[^>]*>\s*/, '')
-  .replace(/<meta name="viewport"[^>]*>\s*/, '');
+  .replace(/<meta name="viewport"[^>]*>\s*/, '')
+  // Home-screen install is for the hosted site; the artifact page has its own.
+  .replace(/<link rel="(?:manifest|apple-touch-icon)"[^>]*>\s*/g, '')
+  .replace(/<meta name="apple-mobile-web-app-title"[^>]*>\s*/, '');
 const body = html.match(/<body>([\s\S]*?)<\/body>/)[1];
 mkdirSync(new URL('../dist/', import.meta.url), { recursive: true });
 writeFileSync(new URL('../dist/artifact.html', import.meta.url), `${head.trim()}\n${body.trim()}\n`);

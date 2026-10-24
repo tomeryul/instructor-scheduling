@@ -11,11 +11,16 @@ import {
 } from './scheduling.js';
 import { buildDocument, toHtml, toPlainText, toDocxBlob, dayLabel, shortDate, monthLabel } from './export.js';
 import { openStore, saveFile, loadScript } from './storage.js';
+import { stampChanges, mergeStates, describeChanges, packState, unpackState, sharedState } from './sync.js';
+import { parseRepo, checkRepo, readFile, writeFile, connectLink, readConnectLink, DEFAULT_PATH } from './github-sync.js';
 import { demoState } from './demo.js';
 import { icon } from './icons.js';
 
 const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@9.0.2/build/index.umd.js';
+const QR_URL = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
+const DEVICE_KEY = 'nsm-shibutz-device';
+const SYNC_KEY = 'nsm-shibutz-sync';
 
 const DEFAULT_SETTINGS = {
   subjects: { chem: true, general: true, bio: false, cs: false, other: false },
@@ -58,6 +63,8 @@ function emptyState() {
     exportOptions: clone(DEFAULT_EXPORT),
     imports: { roster: null, schedule: [] },
     lastImport: null,
+    deleted: { events: {}, slots: {} },
+    updatedAt: 0,
   };
 }
 
@@ -70,6 +77,7 @@ function withDefaults(s) {
     exportOptions: { ...base.exportOptions, ...(s.exportOptions || {}), sections: { ...base.exportOptions.sections, ...(s.exportOptions?.sections || {}) } },
     notes: { ...base.notes, ...(s.notes || {}) },
     imports: { ...base.imports, ...(s.imports || {}) },
+    deleted: { events: { ...(s.deleted?.events || {}) }, slots: { ...(s.deleted?.slots || {}) } },
   };
 }
 
@@ -114,14 +122,42 @@ const initials = name => name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => 
 let saveTimer = null;
 let saving = false;
 let dirty = false;
+let snapshot = null; // the state as of the last commit, to see what changed
+
+/** Stamp what changed since the last commit, save it and hand it to sync - without redrawing. */
+function persist() {
+  if (demo) return;
+  if (stampChanges(snapshot, state)) state.updatedAt = Date.now();
+  snapshot = clone(state);
+  syncState.autoPushes = 0;
+  dirty = true;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flush, 500);
+  scheduleSync();
+}
 
 function commit() {
   personIndex = null;
   render();
-  if (demo) return;
+  persist();
+}
+
+/** Remember a deletion, so a merge with another device does not bring the item back. */
+function markDeleted(kind, id) {
+  state.deleted[kind][id] = Date.now();
+  state.updatedAt = Date.now();
+}
+
+/** Swap in a state that came from another device: it carries its own stamps. */
+function replaceState(next) {
+  state = withDefaults(next);
+  snapshot = clone(state);
+  personIndex = null;
+  autoUndo = null;
+  render();
   dirty = true;
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(flush, 500);
+  saveTimer = setTimeout(flush, 300);
 }
 
 async function flush() {
@@ -142,18 +178,21 @@ function leaveDemo() {
   if (!demo) return;
   demo = false;
   state = emptyState();
+  snapshot = clone(state);
   autoUndo = null;
 }
 
 // ---------------------------------------------------------------- feedback
 
 let toastTimer = null;
-function toast(msg) {
+/** A short message; `action` ({label, run}) adds one button, e.g. Undo. */
+function toast(msg, action) {
   const el = $('#toast');
-  el.textContent = msg;
+  el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button" class="toast-action">${esc(action.label)}</button>` : ''}`;
+  if (action) el.querySelector('button').onclick = () => { el.hidden = true; action.run(); };
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3400);
+  toastTimer = setTimeout(() => { el.hidden = true; }, action ? 8000 : 3400);
 }
 
 async function copyText(text, html) {
@@ -311,7 +350,7 @@ function demoNotice() {
     <div class="list"><div class="notice">
       <span class="row-icon">${icon('info.circle')}</span>
       <div class="row-main"><span class="row-title"><b>נתוני דוגמה</b></span>
-        <span class="row-sub">השמות והאירועים כאן מומצאים, כדי להראות איך זה עובד. שינויים בדוגמה לא נשמרים.</span></div>
+        <span class="row-sub">השמות והאירועים כאן מומצאים, כדי להראות איך זה עובד. שינויים בדוגמה לא נשמרים. כבר עובדים במכשיר אחר? בלשונית "קבצים" מביאים את הנתונים משם.</span></div>
       <button class="btn btn-tinted btn-small" data-go="files" id="demo-import">ייבוא הקבצים שלי</button>
     </div></div>`;
 }
@@ -378,6 +417,7 @@ function renderBoard() {
   el.innerHTML = `
     ${titleBlock('שיבוץ', `${esc(monthText)} · ${open ? `${open} עמדות פתוחות` : 'הכול משובץ'}`)}
     ${demoNotice()}
+    ${syncNotice()}
     <div class="list summary-card">
       <div class="stats">
         <div class="stat open"><b>${open}</b><span>עמדות פתוחות</span></div>
@@ -645,6 +685,7 @@ function slotEditor(ev, slot, isNew) {
     },
     remove() {
       ev.slots = ev.slots.filter(s => s !== slot);
+      markDeleted('slots', slot.id);
       closeDialog();
       commit();
     },
@@ -715,7 +756,7 @@ function eventMenu(anchor, ev) {
         if (!ev.slots.length) slotEditor(ev, newSlot(ev), true);
       } }
       : { label: 'הסתרה', icon: 'eye.slash', run: () => { ev.ignored = true; commit(); toast('האירוע הוסתר. אפשר להחזיר אותו דרך "מוסתרים" בסינון.'); } },
-    ...(ev.missingFromSchedule || ev.manual ? [{ label: 'מחיקה', icon: 'trash', destructive: true, run: () => { state.events = state.events.filter(x => x !== ev); commit(); toast('האירוע נמחק'); } }] : []),
+    ...(ev.missingFromSchedule || ev.manual ? [{ label: 'מחיקה', icon: 'trash', destructive: true, run: () => { state.events = state.events.filter(x => x !== ev); markDeleted('events', ev.id); commit(); toast('האירוע נמחק'); } }] : []),
   ];
   openMenu(anchor, items);
 }
@@ -1001,15 +1042,65 @@ function renderFiles() {
       </div>
       <p class="list-footer">${lastSch ? `יובא: ${esc(lastSch.name)} · ${lastSch.events} תאים (${shortDate(lastSch.from)}–${shortDate(lastSch.to)}) · ${fmt(lastSch.at)}. ` : ''}כשהלו"ז מתעדכן מייבאים אותו שוב - השיבוצים שלכם נשמרים.</p>
     </section>
+    ${devicesSection()}
     <section class="list-section">
-      <h3 class="list-header">שמירה וגיבוי</h3>
+      <h3 class="list-header">העברה בקובץ</h3>
       <div class="list">
-        <button class="row action" data-act="backup" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.down')}<span class="row-main">הורדת גיבוי</span></button>
-        <label class="row action">${icon('tray.and.arrow.down')}<span class="row-main">שחזור מגיבוי</span><input type="file" id="file-backup" accept=".json,application/json" hidden></label>
-        <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">מחיקת כל הנתונים</span></button>
+        <button class="row action" data-act="send" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main">שליחה למכשיר אחר</span></button>
+        <label class="row action">${icon('tray.and.arrow.down')}<span class="row-main">קבלה ממכשיר אחר</span><input type="file" id="file-receive" accept=".json,.txt,application/json,text/plain" hidden></label>
       </div>
-      <p class="list-footer">${store?.kind === 'db' ? 'הנתונים נשמרים בחשבון שלכם ב-claude.ai, ורק אתם רואים אותם.' : 'הנתונים נשמרים בדפדפן הזה בלבד. כדאי להוריד גיבוי מדי פעם, ולהעביר איתו את העבודה למחשב אחר.'}</p>
+      <p class="list-footer">${transferFooter()}</p>
+    </section>
+    <section class="list-section">
+      <div class="list">
+        <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">מחיקת כל הנתונים מהמכשיר הזה</span></button>
+      </div>
     </section>`;
+}
+
+function devicesSection() {
+  if (store?.kind === 'db') {
+    return `
+    <section class="list-section">
+      <h3 class="list-header">בין מכשירים</h3>
+      <div class="list"><div class="row"><span class="row-icon ok">${icon('checkmark')}</span><span class="row-main"><span class="row-title">מסונכרן דרך החשבון ב-claude.ai</span><span class="row-sub">פותחים את אותו קישור בכל מכשיר שמחובר לחשבון, והנתונים שם. רק אתם רואים אותם.</span></span></div></div>
+    </section>`;
+  }
+  if (syncCfg) {
+    return `
+    <section class="list-section">
+      <h3 class="list-header">סנכרון אוטומטי</h3>
+      <div class="list">
+        <div class="row" id="sync-status">${syncStatusHtml()}</div>
+        <button class="row action" data-act="sync-now">${icon('arrow.clockwise')}<span class="row-main">סנכרון עכשיו</span></button>
+        <button class="row action" data-act="sync-share">${icon('qrcode')}<span class="row-main">חיבור מכשיר נוסף</span>${chevron()}</button>
+        <button class="row action" data-act="sync-off">${icon('xmark.circle.fill')}<span class="row-main">ניתוק המכשיר הזה</span></button>
+      </div>
+      <p class="list-footer">כל שינוי נשמר כאן מיד ונשלח ל-GitHub תוך שניות, ומכשיר שנפתח מביא אותו. שינויים משני מכשירים מתמזגים: בכל עמדה נשאר השיבוץ האחרון שנעשה.</p>
+    </section>`;
+  }
+  const iosTip = isIOS() && !isStandalone()
+    ? ' באייפון כדאי גם להוסיף את האתר למסך הבית (שיתוף ← הוספה למסך הבית): Safari עלול למחוק נתונים של אתר שלא נפתח כמה ימים. לאתר במסך הבית יש אחסון נפרד, אז מעבירים אליו את הנתונים פעם אחת.'
+    : '';
+  return `
+    <section class="list-section">
+      <h3 class="list-header">בין מכשירים</h3>
+      <div class="list">
+        <button class="row" data-act="sync-setup"><span class="row-icon sync">${icon('arrow.triangle.2.circlepath')}</span><span class="row-main"><span class="row-title">סנכרון אוטומטי דרך GitHub</span><span class="row-sub">הגדרה של פעם אחת בכל מכשיר, ומאז הכול מתעדכן לבד</span></span>${chevron()}</button>
+      </div>
+      <p class="list-footer">בלי סנכרון, כל מכשיר שומר עותק משלו ומעבירים עבודה בקובץ.${iosTip}</p>
+    </section>`;
+}
+
+function transferFooter() {
+  const how = isTouch()
+    ? 'נפתח תפריט השיתוף: WhatsApp לעצמכם, מייל, AirDrop או שמירה בקבצים.'
+    : 'הקובץ יורד למחשב; שולחים אותו לעצמכם (מייל, WhatsApp, Drive).';
+  const log = [
+    device.sent ? `נשלח מכאן לאחרונה ${whenLabel(device.sent)}.` : '',
+    device.received ? `התקבל לאחרונה מ-${esc(isolate(device.received.from))} ${whenLabel(device.received.at)}.` : '',
+  ].filter(Boolean).join(' ');
+  return `${how} במכשיר השני בוחרים "קבלה ממכשיר אחר": הנתונים מתמזגים עם מה שיש שם, ובכל עמדה נשאר השיבוץ האחרון שנעשה. ${log}`;
 }
 
 // ---------------------------------------------------------------- imports
@@ -1093,17 +1184,327 @@ async function importSchedule(file) {
   }
 }
 
-async function restoreBackup(file) {
-  try {
-    const data = JSON.parse(await file.text());
-    if (!Array.isArray(data.events) || !Array.isArray(data.instructors)) throw new Error('זה לא קובץ גיבוי של האתר');
-    leaveDemo();
-    state = withDefaults(data);
-    toast('הגיבוי שוחזר');
-    commit();
-  } catch (e) {
-    toast('השחזור נכשל: ' + (e.message || e));
+// ---------------------------------------------------------------- devices
+
+const readLocal = key => { try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch { return null; } };
+const writeLocal = (key, value) => {
+  try { if (value == null) localStorage.removeItem(key); else localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage is off */ }
+};
+
+function guessDeviceName() {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return 'iPhone';
+  if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+  if (/Android/.test(ua)) return /Mobile/.test(ua) ? 'טלפון Android' : 'טאבלט Android';
+  if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+  if (/Windows/.test(ua)) return 'מחשב Windows';
+  if (/CrOS/.test(ua)) return 'Chromebook';
+  if (/Linux/.test(ua)) return 'מחשב Linux';
+  return 'מכשיר אחר';
+}
+
+/** This device: its name, and when work last left it or arrived. */
+const device = { name: guessDeviceName(), sent: null, received: null, ...(readLocal(DEVICE_KEY) || {}) };
+const saveDevice = () => writeLocal(DEVICE_KEY, device);
+const isTouch = () => window.matchMedia('(pointer: coarse)').matches;
+const isIOS = () => /iPhone|iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+function whenLabel(t) {
+  const d = new Date(t);
+  if (!t || Number.isNaN(d.getTime())) return '';
+  const ago = Date.now() - d.getTime();
+  if (ago < 60000) return 'לפני רגע';
+  if (ago < 3600000) return `לפני ${Math.round(ago / 60000)} דק׳`;
+  const hm = d.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === new Date().toDateString()) return `היום ${hm}`;
+  if (d.toDateString() === new Date(Date.now() - 86400000).toDateString()) return `אתמול ${hm}`;
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')} ${hm}`;
+}
+
+// Device and repository names are often Latin: isolate them so the Hebrew sentence keeps its order.
+const isolate = text => `\u2068${text}\u2069`;
+
+/** "התקבל מ-iPhone: 5 שיבוצים, לו"ז עדכני יותר", or '' when nothing changed. */
+function changesText(d, from) {
+  const n = (k, one, many) => (k === 1 ? one : `${k} ${many}`);
+  const parts = [];
+  if (d.assigned) parts.push(n(d.assigned, 'שיבוץ אחד', 'שיבוצים'));
+  if (d.cleared) parts.push(n(d.cleared, 'עמדה אחת שפונתה', 'עמדות שפונו'));
+  if (d.events) parts.push(n(d.events, 'אירוע אחד', 'אירועים'));
+  if (d.schedule) parts.push('לו"ז עדכני יותר');
+  if (d.roster) parts.push('רשימת מדריכים עדכנית יותר');
+  if (d.people) parts.push(n(d.people, 'עדכון במדריך/ה', 'עדכונים במדריכים'));
+  if (d.notes) parts.push('הערות לייצוא');
+  return parts.length ? `התקבל מ-${isolate(from)}: ${parts.join(', ')}` : '';
+}
+
+let persistAsked = false;
+/** Ask the browser to keep this site's data, once there is data worth keeping. */
+async function askToPersist() {
+  if (persistAsked || store?.kind !== 'local' || !navigator.storage?.persist) return;
+  persistAsked = true;
+  try { if (!(await navigator.storage.persisted())) await navigator.storage.persist(); } catch { /* not offered here */ }
+}
+
+// ---------------------------------------------------------------- moving work between devices in a file
+
+async function sendToDevice() {
+  const text = JSON.stringify(packState(state, device.name));
+  const filename = `שיבוץ מדריכים ${todayISO()} ${device.name}.json`;
+  const sent = () => { device.sent = new Date().toISOString(); saveDevice(); if (view === 'files') renderFiles(); };
+  // Phones: the share sheet (WhatsApp to yourself, mail, AirDrop, Files). Some browsers only share .txt.
+  if (isTouch() && navigator.canShare) {
+    for (const [ext, type] of [['json', 'application/json'], ['txt', 'text/plain']]) {
+      const file = new File([text], filename.replace(/json$/, ext), { type });
+      if (!navigator.canShare({ files: [file] })) continue;
+      try { await navigator.share({ files: [file], title: 'שיבוץ מדריכים' }); sent(); return; } catch (e) { if (e.name === 'AbortError') return; break; }
+    }
   }
+  try {
+    if (await saveFile(filename, text) === 'saved') { sent(); toast('הקובץ ירד. במכשיר השני: קבצים ← "קבלה ממכשיר אחר"'); }
+  } catch (e) { toast('ההורדה נכשלה: ' + (e.message || e.code)); }
+}
+
+async function receiveFile(file) {
+  let data = null;
+  try { data = JSON.parse(await file.text()); } catch { data = null; }
+  const incoming = unpackState(data);
+  if (!incoming) { toast('זה לא קובץ שנשלח מהאתר'); return; }
+  const from = data.device || 'הקובץ';
+  const wasDemo = demo;
+  leaveDemo();
+  const before = clone(state);
+  const merged = mergeStates(state, incoming);
+  const text = changesText(describeChanges(before, merged), from);
+  device.received = { at: new Date().toISOString(), from };
+  saveDevice();
+  replaceState(merged);
+  askToPersist();
+  scheduleSync();
+  if (!text) { toast(`אין חדש מ-${isolate(from)} - המכשיר הזה כבר מעודכן`); return; }
+  toast(text, wasDemo ? null : { label: 'ביטול', run: () => { replaceState(before); scheduleSync(); toast('הקבלה בוטלה'); } });
+}
+
+// ---------------------------------------------------------------- automatic sync through GitHub
+
+let syncCfg = readLocal(SYNC_KEY); // { owner, repo, path, token, sha, etag, remoteHash, at }
+const syncState = { busy: false, pending: false, error: null, timer: null, autoPushes: 0 };
+const syncOn = () => !!syncCfg && store?.kind === 'local';
+const saveSyncCfg = () => writeLocal(SYNC_KEY, syncCfg);
+
+function scheduleSync(delay = 2500) {
+  if (!syncOn()) return;
+  clearTimeout(syncState.timer);
+  syncState.timer = setTimeout(syncNow, delay);
+}
+
+// Never swap the data under an open sheet, menu or a field being typed in.
+const uiBusy = () => $('#dialog').open || $('#alert').open || !!menuHandlers
+  || !!document.activeElement?.matches?.('main textarea, main input[type="search"], main input[type="text"], main input:not([type])');
+
+/** JSON with sorted keys, so equal states compare equal whatever order they were built in. */
+const canon = x => JSON.stringify(x, (k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(key => [key, v[key]])) : v));
+function hashText(str) {
+  let a = 0x811c9dc5, b = 0x9747b28c;
+  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); a = Math.imul(a ^ c, 16777619); b = Math.imul(b ^ c, 2246822507); }
+  return (a >>> 0).toString(36) + (b >>> 0).toString(36);
+}
+const sharedHash = s => hashText(canon(sharedState(s)));
+
+/** Pull the file, merge it in, and push what this device has that the file lacks. */
+async function syncNow() {
+  if (!syncOn()) return;
+  if (syncState.busy || uiBusy()) { syncState.pending = true; return; }
+  const cfg = syncCfg;
+  syncState.busy = true;
+  syncState.pending = false;
+  renderSyncStatus();
+  try {
+    for (let attempt = 0; ; attempt++) {
+      const remote = await readFile(cfg, cfg.sha && cfg.remoteHash ? cfg.etag : null);
+      if (remote && !remote.notModified) {
+        const incoming = unpackState(remote.data);
+        if (!incoming) throw new Error('הקובץ ב-GitHub לא נראה כמו קובץ של האתר');
+        if (remote.sha !== cfg.sha) {
+          if (uiBusy()) { syncState.pending = true; return; }
+          const wasDemo = demo && hasData(withDefaults(incoming));
+          if (wasDemo) leaveDemo();
+          if (!demo) {
+            const before = clone(state);
+            const merged = mergeStates(state, incoming);
+            if (canon(sharedState(merged)) !== canon(sharedState(before))) {
+              replaceState(merged);
+              const text = wasDemo ? `הנתונים נטענו מ-${isolate(`${cfg.owner}/${cfg.repo}`)}` : changesText(describeChanges(before, merged), remote.data.device || 'מכשיר אחר');
+              if (text) toast(text);
+            }
+          }
+        }
+        Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming) });
+      } else if (!remote) {
+        Object.assign(cfg, { sha: null, etag: null, remoteHash: null });
+      }
+      if (demo) break; // never write the sample data
+      const localHash = sharedHash(state);
+      // A cap on pushes between the user's own edits stops two devices bouncing a change back and forth.
+      if (localHash === cfg.remoteHash || syncState.autoPushes >= 4) break;
+      try {
+        syncState.autoPushes++;
+        cfg.sha = await writeFile(cfg, JSON.stringify(packState(state, device.name)), cfg.sha, `עדכון מ-${device.name}`);
+        Object.assign(cfg, { etag: null, remoteHash: localHash });
+        break;
+      } catch (e) {
+        if (e.code === 'conflict' && attempt < 3) { cfg.etag = null; continue; }
+        throw e;
+      }
+    }
+    cfg.at = new Date().toISOString();
+    syncState.error = null;
+  } catch (e) {
+    syncState.error = e;
+  } finally {
+    if (syncCfg === cfg) saveSyncCfg();
+    syncState.busy = false;
+    renderSyncStatus();
+    if (syncState.pending && !uiBusy()) scheduleSync(1000);
+  }
+}
+
+let shownSyncError = null;
+function renderSyncStatus() {
+  const el = $('#sync-status');
+  if (el) el.innerHTML = syncStatusHtml();
+  // A new kind of failure shows on the board too; being offline does not.
+  const code = syncState.error && syncState.error.code !== 'offline' ? syncState.error.message : null;
+  if (code !== shownSyncError) {
+    shownSyncError = code;
+    if (view === 'board' && !uiBusy()) render();
+  }
+}
+
+function syncStatusHtml() {
+  if (!syncCfg) return '';
+  const e = syncState.error;
+  let sub;
+  let cls = 'sync';
+  if (syncState.busy) sub = 'מסנכרן…';
+  else if (e && e.code === 'offline') sub = 'אין חיבור לאינטרנט. השינויים נשמרים כאן ויישלחו כשהחיבור יחזור.';
+  else if (e) { sub = `הסנכרון נכשל: ${e.message}`; cls = 'bad'; }
+  else sub = syncCfg.at ? `מסונכרן · ${whenLabel(syncCfg.at)}` : 'עוד לא סונכרן';
+  return `<span class="row-icon ${cls}">${icon(cls === 'bad' ? 'exclamation.triangle.fill' : 'arrow.triangle.2.circlepath')}</span>
+    <span class="row-main"><span class="row-title"><bdi>${esc(`${syncCfg.owner}/${syncCfg.repo}`)}</bdi></span><span class="row-sub">${esc(sub)}</span></span>`;
+}
+
+function syncNotice() {
+  const e = syncState.error;
+  if (!syncOn() || !e || e.code === 'offline') return '';
+  return `
+    <div class="list"><div class="notice">
+      <span class="row-icon bad">${icon('exclamation.triangle.fill')}</span>
+      <div class="row-main"><span class="row-title"><b>הסנכרון לא עובד</b></span>
+        <span class="row-sub">${esc(e.message)}. השינויים נשמרים במכשיר הזה.</span></div>
+      <button class="btn btn-tinted btn-small" data-go="files">פרטים</button>
+    </div></div>`;
+}
+
+/** Check the repository, keep the settings on this device, and sync right away. */
+async function connectSync(cfg) {
+  const say = (text, bad = false) => { const el = $('#gh-result'); if (el) { el.textContent = text; el.classList.toggle('bad', bad); } };
+  say('בודק את החיבור ל-GitHub…');
+  try {
+    await checkRepo(cfg);
+  } catch (e) {
+    say(e.message, true);
+    return;
+  }
+  syncCfg = { owner: cfg.owner, repo: cfg.repo, path: cfg.path || DEFAULT_PATH, token: cfg.token };
+  saveSyncCfg();
+  syncState.error = null;
+  syncState.autoPushes = 0;
+  closeDialog();
+  toast('הסנכרון מחובר. מעכשיו כל שינוי עובר לבד בין המכשירים המחוברים.');
+  render();
+  await syncNow();
+}
+
+function syncSetup() {
+  openSheet({
+    title: 'סנכרון דרך GitHub',
+    sub: 'הגדרה של פעם אחת בכל מכשיר. אחר כך כל שינוי עובר לבד בין המכשירים.',
+    done: 'חיבור',
+    body: `
+      <section class="list-section">
+        <h3 class="list-header">פעם אחת, באתר GitHub</h3>
+        <div class="list">
+          <a class="row action" href="https://github.com/new" target="_blank" rel="noopener">${icon('plus.circle.fill')}<span class="row-main"><span class="row-title">יצירת ריפו פרטי</span><span class="row-sub">שם לדוגמה: shibutz-data · לסמן Private</span></span>${icon('arrow.up.forward', 'chevron')}</a>
+          <a class="row action" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">${icon('key')}<span class="row-main"><span class="row-title">יצירת טוקן</span><span class="row-sub">Repository access: Only select repositories ← הריפו החדש. Permissions ← Contents: Read and write.</span></span>${icon('arrow.up.forward', 'chevron')}</a>
+        </div>
+      </section>
+      <section class="list-section">
+        <h3 class="list-header">במכשיר הזה</h3>
+        <div class="list">
+          <div class="row"><input class="field-inline" id="gh-repo" placeholder="שם-משתמש/שם-הריפו, או קישור חיבור" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="הריפו"></div>
+          <div class="row"><input class="field-inline" id="gh-token" type="password" placeholder="הטוקן (github_pat_…)" autocomplete="off" spellcheck="false" aria-label="הטוקן"></div>
+        </div>
+        <p class="list-footer" id="gh-result">הנתונים נשמרים כקובץ ${DEFAULT_PATH} בריפו, ו-GitHub שומר כל גרסה שלו. בקובץ יש את פרטי המדריכים, ולכן רק ריפו פרטי. הטוקן נשמר רק במכשיר הזה.</p>
+      </section>`,
+  }, {
+    save() {
+      const raw = $('#gh-repo').value.trim();
+      const fromLink = readConnectLink(raw);
+      if (fromLink) { connectSync(fromLink); return; }
+      const repo = parseRepo(raw);
+      const token = $('#gh-token').value.trim();
+      if (!repo || !token) {
+        const el = $('#gh-result');
+        el.textContent = 'צריך את שם הריפו (שם-משתמש/שם-הריפו) ואת הטוקן.';
+        el.classList.add('bad');
+        return;
+      }
+      connectSync({ ...repo, token });
+    },
+  });
+}
+
+/** Opened from a connect link (QR or message): ask before connecting. */
+function confirmConnect(cfg) {
+  openSheet({
+    title: 'חיבור לסנכרון',
+    sub: `המכשיר הזה יסתנכרן עם ${esc(`${cfg.owner}/${cfg.repo}`)} ב-GitHub.`,
+    done: 'חיבור',
+    body: `<p class="list-footer" id="gh-result" style="padding-block-start:0">מה שכבר יש במכשיר הזה יתמזג עם הנתונים שם, ושום שיבוץ לא יימחק.</p>`,
+  }, { save() { connectSync(cfg); } });
+}
+
+async function syncShare() {
+  const link = connectLink(syncCfg, location.href.split('#')[0]);
+  openSheet({
+    title: 'חיבור מכשיר נוסף',
+    sub: 'סורקים את הקוד במצלמה של הטלפון, או שולחים לעצמכם את הקישור ופותחים אותו במכשיר השני.',
+    body: `
+      <div class="qr-box"><div id="qr" class="qr" role="img" aria-label="קוד QR לחיבור מכשיר נוסף"></div></div>
+      <div class="list"><button class="row action" data-act="copy-connect">${icon('link')}<span class="row-main">העתקת קישור החיבור</span></button></div>
+      <p class="list-footer">בקישור יש את הטוקן: מי שמחזיק בו יכול לקרוא ולשנות את קובץ הנתונים, אז שולחים אותו רק לעצמכם. אם האתר מותקן במסך הבית של האייפון, פותחים אותו משם ומדביקים את הקישור ב"סנכרון דרך GitHub".</p>`,
+  }, { link });
+  try {
+    const qrcode = await loadScript(QR_URL, 'qrcode');
+    const qr = qrcode(0, 'L');
+    qr.addData(link);
+    qr.make();
+    const box = $('#qr');
+    if (box) box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  } catch {
+    const box = $('#qr');
+    if (box) box.textContent = 'קוד ה-QR לא נטען. אפשר להעתיק את הקישור.';
+  }
+}
+
+function syncOff() {
+  syncCfg = null;
+  saveSyncCfg();
+  syncState.error = null;
+  render();
+  toast('הסנכרון נותק במכשיר הזה. הנתונים נשארו כאן וגם ב-GitHub.');
 }
 
 // ---------------------------------------------------------------- render & routing
@@ -1204,6 +1605,7 @@ document.addEventListener('click', async e => {
     if (act === 'sheet-done') { dialogHandlers.save?.(); return; }
     if (act === 'slot-delete') { dialogHandlers.remove(); return; }
     if (act === 'avail-reset') { dialogHandlers.reset(); return; }
+    if (act === 'copy-connect') { copyText(dialogHandlers.link); return; }
     if (act === 'remind') {
       const p = people().find(x => x.id === t.closest('[data-person]').dataset.person);
       if (p) copyText(reminderText(p));
@@ -1278,21 +1680,26 @@ document.addEventListener('click', async e => {
       copyText(toPlainText(blocks), toHtml(blocks));
       break;
     }
-    case 'backup': {
-      try { await saveFile(`גיבוי שיבוץ מדריכים ${todayISO()}.json`, JSON.stringify(state)); } catch (err) { toast('ההורדה נכשלה: ' + (err.message || err.code)); }
-      break;
-    }
+    case 'send': sendToDevice(); break;
+    case 'sync-setup': syncSetup(); break;
+    case 'sync-now': syncState.autoPushes = 0; syncNow(); break;
+    case 'sync-share': syncShare(); break;
+    case 'sync-off': syncOff(); break;
     case 'reset':
       openAlert({
         title: 'למחוק את כל הנתונים?',
-        message: 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהאתר. אי אפשר לבטל את זה - כדאי להוריד גיבוי קודם.',
+        message: syncOn()
+          ? 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה, והסנכרון בו ינותק. הקובץ ב-GitHub נשאר כמו שהוא.'
+          : 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה. אי אפשר לבטל את זה - כדאי לשלוח קודם עותק למכשיר אחר.',
         actions: [
           { label: 'ביטול', cls: 'btn-gray' },
           { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: () => {
+            if (syncCfg) { syncCfg = null; saveSyncCfg(); syncState.error = null; }
             state = emptyState();
+            snapshot = clone(state);
             autoUndo = null;
             notices.roster = notices.schedule = null;
-            toast('כל הנתונים נמחקו');
+            toast('כל הנתונים נמחקו מהמכשיר הזה');
             commit();
           } },
         ],
@@ -1316,7 +1723,7 @@ document.addEventListener('change', e => {
 
   if (t.id === 'file-roster' && t.files[0]) importRoster(t.files[0]);
   if ((t.id === 'file-schedule' || t.id === 'file-schedule-quick') && t.files[0]) importSchedule(t.files[0]);
-  if (t.id === 'file-backup' && t.files[0]) restoreBackup(t.files[0]);
+  if (t.id === 'file-receive' && t.files[0]) receiveFile(t.files[0]);
   // The schedule file often keeps its name; clearing lets the same file be picked again.
   if (t.type === 'file') setTimeout(() => { t.value = ''; }, 0);
 });
@@ -1344,7 +1751,7 @@ document.addEventListener('input', e => {
     clearTimeout(notesTimer);
     notesTimer = setTimeout(() => {
       refreshPreview();
-      if (!demo) { dirty = true; flush(); }
+      persist();
     }, 400);
   }
 });
@@ -1379,13 +1786,19 @@ document.addEventListener('drop', e => {
   zone.classList.remove('over');
   const file = e.dataTransfer.files[0];
   if (!file) return;
-  if (zone.dataset.drop === 'roster') importRoster(file);
+  if (/\.(json|txt)$/i.test(file.name)) receiveFile(file);
+  else if (zone.dataset.drop === 'roster') importRoster(file);
   else importSchedule(file);
 });
 
-$('#dialog').addEventListener('close', () => { dialogHandlers = {}; });
+$('#dialog').addEventListener('close', () => { dialogHandlers = {}; if (syncState.pending) scheduleSync(800); });
+$('#alert').addEventListener('close', () => { if (syncState.pending) scheduleSync(800); });
+document.addEventListener('focusout', () => { if (syncState.pending) scheduleSync(1500); });
+window.addEventListener('online', () => scheduleSync(500));
 document.addEventListener('toggle', e => { if (e.target.id === 'filters-box') filtersOpen = e.target.open; }, true);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { flush(); if (syncOn() && sharedHash(state) !== syncCfg.remoteHash) syncNow(); } else scheduleSync(300);
+});
 window.addEventListener('resize', closeMenu);
 // The bar firms into a band once content scrolls beneath it.
 const navbar = $('#navbar');
@@ -1410,8 +1823,17 @@ async function start() {
     state = { ...emptyState(), instructors: d.instructors, events: d.events };
     demo = true;
   }
+  snapshot = clone(state);
   personIndex = null;
   render();
+  if (hasData(state) && !demo) askToPersist();
+  // A connect link (QR code or message) opens the sync confirmation once, then leaves the address bar.
+  const link = readConnectLink(location.hash);
+  if (link) {
+    history.replaceState(null, '', location.pathname + location.search);
+    if (store.kind === 'local') confirmConnect(link);
+  } else if (syncOn()) syncNow();
+  setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 90000);
 }
 
 start();

@@ -59,7 +59,7 @@ const namesIn = slot => slot.groups.flatMap(g => g.positions).filter(p => p.name
 const daysBetween = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 86400000;
 
 /** Pair each fresh event with the event it was in the previous import, if any. */
-function pairEvents(oldEvents, fresh, from, to) {
+export function pairEvents(oldEvents, fresh, from, to) {
   const pairs = new Map();
   const usedOld = new Set();
   const link = (ev, old, moved = false) => { pairs.set(ev, { old, moved }); usedOld.add(old); };
@@ -97,7 +97,7 @@ function pairEvents(oldEvents, fresh, from, to) {
 }
 
 /** Pair each fresh slot with its earlier version: same times, then same activity, then same place among its kind. */
-function pairSlots(ev, old) {
+export function pairSlots(ev, old) {
   const pairs = [];
   const used = new Set();
   const paired = s => pairs.some(p => p[0] === s);
@@ -131,7 +131,7 @@ function mergePosition(p, op, slot, changes) {
   const fileBefore = op.pdfName !== undefined ? op.pdfName : op.source === 'pdf' ? op.name : fileNow;
   const where = `"${slot.label}" ${slot.start}-${slot.end}`;
   if (mine) {
-    if (fileNow === fileBefore || !fileNow || (fileBefore && sameName(fileNow, fileBefore))) Object.assign(p, { name: op.name, source: op.source });
+    if (fileNow === fileBefore || !fileNow || (fileBefore && sameName(fileNow, fileBefore))) Object.assign(p, { name: op.name, source: op.source, at: op.at });
     else if (sameName(fileNow, op.name)) p.source = 'pdf';
     else changes.push({ level: 'attention', text: `בלו"ז רשום/ה ${fileNow} במקום ${op.name} ששובץ/ה אצלך (${where})` });
     return;
@@ -145,6 +145,7 @@ function mergeEvent(ev, old, moved) {
   const changes = [];
   ev.ignored = old.ignored;
   ev.note = old.note;
+  if (old.at) ev.at = old.at;
   if (old.kindOverride) { ev.kind = old.kindOverride; ev.kindOverride = old.kindOverride; }
   if (moved) {
     const people = old.slots.flatMap(namesIn);
@@ -154,7 +155,7 @@ function mergeEvent(ev, old, moved) {
   for (const [slot, oldSlot] of pairs) {
     // The user's own edits to the shape of a slot win over the file.
     if (oldSlot.edited) {
-      Object.assign(slot, { label: oldSlot.label, location: oldSlot.location, kind: oldSlot.kind, start: oldSlot.start, end: oldSlot.end, subject: oldSlot.subject, edited: true });
+      Object.assign(slot, { label: oldSlot.label, location: oldSlot.location, kind: oldSlot.kind, start: oldSlot.start, end: oldSlot.end, subject: oldSlot.subject, edited: true, at: oldSlot.at });
       slot.groups = oldSlot.groups.map(g => ({ ...g, positions: g.positions.map(p => ({ ...p })) }));
       continue;
     }

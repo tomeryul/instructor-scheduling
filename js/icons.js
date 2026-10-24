@@ -37,6 +37,11 @@ const P = {
   'tray.and.arrow.down': '<path d="M12 3v9.5M8.5 9l3.5 3.5L15.5 9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.5 14h5a3.5 3.5 0 0 0 7 0h5v4.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>',
   'tablecells': '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10" stroke="currentColor" stroke-width="1.6"/>',
   'pdf': '<path d="M6.5 2.5h7l5 5v12a2 2 0 0 1-2 2h-10a2 2 0 0 1-2-2v-15a2 2 0 0 1 2-2z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/><path d="M13.5 2.5v5h5M8 13h8M8 16.5h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  'arrow.triangle.2.circlepath': '<path d="M19.2 9.6A7.6 7.6 0 0 0 5.6 7.2M4.8 14.4a7.6 7.6 0 0 0 13.6 2.4" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5.2 3.6v3.9h3.9M18.8 20.4v-3.9h-3.9" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>',
+  'qrcode': '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M6.4 6.4h1.2v1.2H6.4zM16.4 6.4h1.2v1.2h-1.2zM6.4 16.4h1.2v1.2H6.4zM14 14h2.6v2.6H14zM17.4 17.4H20V20h-2.6zM17.6 14H20v2.2h-2.4zM14 17.8h2.2V20H14z" fill="currentColor"/>',
+  'link': '<path d="M10.2 13.8a4 4 0 0 0 5.6 0l3-3a4 4 0 0 0-5.6-5.6l-1.1 1.1M13.8 10.2a4 4 0 0 0-5.6 0l-3 3a4 4 0 0 0 5.6 5.6l1.1-1.1" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>',
+  'key': '<circle cx="8" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 12h9M18 12v3M21 12v2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>',
+  'arrow.up.forward': '<path d="M7 17L17 7M9 7h8v8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
   'slider': '<path d="M4 7h9M17 7h3M4 17h3M11 17h9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="15" cy="7" r="2.2" fill="none" stroke="currentColor" stroke-width="1.9"/><circle cx="9" cy="17" r="2.2" fill="none" stroke="currentColor" stroke-width="1.9"/>',
 };
 
