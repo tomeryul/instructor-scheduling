@@ -8,111 +8,225 @@ import { checkAvailability } from './roster.js';
 
 export const ROLE_OF_SLOT = { lab: 'lab', lecture: 'lecture', magic: 'magic' };
 
-/** Positions in the app carry who filled them: the schedule file, the user, or auto-fill. */
+/**
+ * Positions in the app carry who filled them (the schedule file, the user, or
+ * auto-fill) and what the schedule file said there at the last import, so the
+ * next import can tell the coordinator's changes from the user's own choices.
+ */
 export function toAppEvent(parsed) {
   return {
     ...parsed,
     ignored: false,
     note: '',
+    changes: [],
     slots: parsed.slots.map(s => ({
       ...s,
-      groups: s.groups.map(g => ({ ...g, positions: g.positions.map(name => ({ name, source: name ? 'pdf' : null })) })),
+      groups: s.groups.map(g => ({ ...g, positions: g.positions.map(name => ({ name, source: name ? 'pdf' : null, pdfName: name })) })),
     })),
   };
 }
 
-const words = s => new Set(normalizeName(s).split(' ').filter(w => w.length > 1));
-function similarity(a, b) {
-  const A = words(a), B = words(b);
-  if (!A.size || !B.size) return 0;
+// Words every title shares; they say nothing about which school or course it is.
+const GENERIC_WORDS = new Set([
+  'יום', 'עיון', 'שיא', 'בכימיה', 'כימיה', 'בביולוגיה', 'ביולוגיה', 'בביוטכנולוגיה', 'לתיכון', 'תיכון', 'לחטיבת', 'חטיבת',
+  'ביניים', 'כיתה', 'כיתות', 'תל', 'תלמידים', 'תלמידות', 'שתי', 'קבוצות', 'קבוצה', 'סהכ', 'שא', 'במשך', 'מפגש', 'קורס',
+  'שכבה', 'שכבות', 'הגיעו', 'לאולפנת', 'אולפנת', 'מתחלפות',
+].map(normalizeName));
+
+function titleWords(title, all = false) {
+  return new Set(normalizeName(title).split(' ').filter(w => all || ((w.length > 1 || /\d/.test(w)) && !GENERIC_WORDS.has(w))));
+}
+
+/**
+ * Share of the shorter title's distinctive words found in the other: a title that
+ * only gained details still matches. A title with no distinctive words at all
+ * ("יום עיון בכימיה") is compared word for word and must match almost entirely.
+ */
+function titleScore(a, b) {
+  let A = titleWords(a), B = titleWords(b);
+  let scale = 1;
+  if (!A.size || !B.size) { A = titleWords(a, true); B = titleWords(b, true); scale = 0.6 / 0.9; }
+  if (!A.size || !B.size) return { score: 0, common: 0 };
   let common = 0;
   for (const w of A) if (B.has(w)) common++;
-  return common / Math.min(A.size, B.size);
+  return { score: (common / Math.min(A.size, B.size)) * scale, common: scale === 1 ? common : 0 };
 }
 
-function findOldEvent(ev, oldEvents, taken) {
-  const byId = oldEvents.find(o => o.id === ev.id && !taken.has(o));
-  if (byId) return byId;
-  let best = null, bestScore = 0.6;
-  for (const o of oldEvents) {
-    if (taken.has(o) || o.date !== ev.date || o.manual) continue;
-    const score = similarity(o.title, ev.title);
-    if (score > bestScore) { best = o; bestScore = score; }
+const sessionNumber = title => (String(title).match(/מפגש\s*(\d+)/) || [])[1] || '';
+const sameName = (a, b) => normalizeName(a) === normalizeName(b);
+const ddmm = iso => `${iso.slice(8, 10)}/${iso.slice(5, 7)}`;
+const namesIn = slot => slot.groups.flatMap(g => g.positions).filter(p => p.name).map(p => p.name);
+const daysBetween = (a, b) => Math.abs(Date.parse(a) - Date.parse(b)) / 86400000;
+
+/** Pair each fresh event with the event it was in the previous import, if any. */
+function pairEvents(oldEvents, fresh, from, to) {
+  const pairs = new Map();
+  const usedOld = new Set();
+  const link = (ev, old, moved = false) => { pairs.set(ev, { old, moved }); usedOld.add(old); };
+
+  for (const ev of fresh) {
+    const old = oldEvents.find(o => o.id === ev.id && !usedOld.has(o));
+    if (old) link(ev, old);
   }
-  return best;
+  // Same day, title changed a little: best matches first.
+  const candidates = [];
+  for (const ev of fresh) {
+    if (pairs.has(ev)) continue;
+    for (const o of oldEvents) {
+      if (usedOld.has(o) || o.manual || o.date !== ev.date) continue;
+      const { score } = titleScore(o.title, ev.title);
+      if (score >= 0.6 && sessionNumber(o.title) === sessionNumber(ev.title)) candidates.push({ score, ev, o });
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  for (const { ev, o } of candidates) if (!pairs.has(ev) && !usedOld.has(o)) link(ev, o);
+
+  // Moved to another day: an event that vanished from its date and one clear match that appeared elsewhere.
+  const lostOld = oldEvents.filter(o => !usedOld.has(o) && !o.manual && o.date >= from && o.date <= to && o.slots.length);
+  const looksSame = (o, ev) => {
+    const { score, common } = titleScore(o.title, ev.title);
+    return score >= 0.8 && common >= 2 && sessionNumber(o.title) === sessionNumber(ev.title) && daysBetween(o.date, ev.date) <= 45;
+  };
+  for (const o of lostOld) {
+    const options = fresh.filter(ev => !pairs.has(ev) && ev.date !== o.date && looksSame(o, ev));
+    if (options.length !== 1) continue;
+    const rivals = lostOld.filter(x => x !== o && !usedOld.has(x) && looksSame(x, options[0]));
+    if (!rivals.length) link(options[0], o, true);
+  }
+  return { pairs, usedOld };
 }
 
-function findOldSlot(slot, index, oldSlots, taken) {
-  const same = oldSlots.filter(o => !taken.has(o) && o.kind === slot.kind);
-  return same.find(o => o.start === slot.start && o.end === slot.end && o.label === slot.label)
-    || same.find(o => o.start === slot.start && o.end === slot.end)
-    || same.find(o => o.id === slot.id)
-    || null;
+/** Pair each fresh slot with its earlier version: same times, then same activity, then same place among its kind. */
+function pairSlots(ev, old) {
+  const pairs = [];
+  const used = new Set();
+  const paired = s => pairs.some(p => p[0] === s);
+  const pass = test => {
+    for (const s of ev.slots) {
+      if (paired(s)) continue;
+      const o = old.slots.find(x => !used.has(x) && x.kind === s.kind && test(s, x));
+      if (o) { used.add(o); pairs.push([s, o]); }
+    }
+  };
+  pass((s, o) => o.start === s.start && o.end === s.end && o.label === s.label);
+  pass((s, o) => o.start === s.start && o.end === s.end);
+  pass((s, o) => o.label === s.label);
+  for (const kind of new Set(ev.slots.map(s => s.kind))) {
+    const restNew = ev.slots.filter(s => s.kind === kind && !paired(s));
+    const restOld = old.slots.filter(o => o.kind === kind && !used.has(o) && !o.manual);
+    if (restNew.length && restNew.length === restOld.length) restNew.forEach((s, i) => { used.add(restOld[i]); pairs.push([s, restOld[i]]); });
+  }
+  return { pairs, used };
+}
+
+/**
+ * One position: what the file says now (p), what the app had (op).
+ * The user's choice stands while the file keeps saying what it said before;
+ * when the coordinator writes a different name, the file wins and it is reported.
+ */
+function mergePosition(p, op, slot, changes) {
+  const fileNow = p.name;
+  if (!op) return;
+  const mine = (op.source === 'user' || op.source === 'auto') && op.name;
+  const fileBefore = op.pdfName !== undefined ? op.pdfName : op.source === 'pdf' ? op.name : fileNow;
+  const where = `"${slot.label}" ${slot.start}-${slot.end}`;
+  if (mine) {
+    if (fileNow === fileBefore || !fileNow || (fileBefore && sameName(fileNow, fileBefore))) Object.assign(p, { name: op.name, source: op.source });
+    else if (sameName(fileNow, op.name)) p.source = 'pdf';
+    else changes.push({ level: 'attention', text: `בלו"ז רשום/ה ${fileNow} במקום ${op.name} ששובץ/ה אצלך (${where})` });
+    return;
+  }
+  if (op.name && !fileNow) changes.push({ level: 'attention', text: `${op.name} הוסר/ה מהלו"ז - העמדה פתוחה (${where})` });
+  else if (op.name && fileNow && !sameName(op.name, fileNow)) changes.push({ level: 'info', text: `בלו"ז: ${fileNow} במקום ${op.name} (${where})` });
+  else if (!op.name && fileNow) changes.push({ level: 'info', text: `נוסף/ה בלו"ז: ${fileNow} (${where})` });
+}
+
+function mergeEvent(ev, old, moved) {
+  const changes = [];
+  ev.ignored = old.ignored;
+  ev.note = old.note;
+  if (old.kindOverride) { ev.kind = old.kindOverride; ev.kindOverride = old.kindOverride; }
+  if (moved) {
+    const people = old.slots.flatMap(namesIn);
+    changes.push({ level: 'attention', text: `הוזז מ-${ddmm(old.date)} ל-${ddmm(ev.date)}${people.length ? ` - לבדוק שהמשובצים פנויים בתאריך החדש (${[...new Set(people)].join(', ')})` : ''}` });
+  }
+  const { pairs, used } = pairSlots(ev, old);
+  for (const [slot, oldSlot] of pairs) {
+    // The user's own edits to the shape of a slot win over the file.
+    if (oldSlot.edited) {
+      Object.assign(slot, { label: oldSlot.label, location: oldSlot.location, kind: oldSlot.kind, start: oldSlot.start, end: oldSlot.end, subject: oldSlot.subject, edited: true });
+      slot.groups = oldSlot.groups.map(g => ({ ...g, positions: g.positions.map(p => ({ ...p })) }));
+      continue;
+    }
+    if ((slot.start !== oldSlot.start || slot.end !== oldSlot.end) && namesIn(oldSlot).length) {
+      changes.push({ level: 'attention', text: `השעות של "${slot.label}" השתנו: ${oldSlot.start}-${oldSlot.end} ← ${slot.start}-${slot.end} (משובצים: ${namesIn(oldSlot).join(', ')})` });
+    }
+    slot.groups.forEach((g, gi) => {
+      const og = oldSlot.groups[gi];
+      g.positions.forEach((p, pi) => mergePosition(p, og && og.positions[pi], slot, changes));
+      // Positions the user added beyond the file's.
+      if (og) for (let pi = g.positions.length; pi < og.positions.length; pi++) g.positions.push({ ...og.positions[pi] });
+    });
+    for (let gi = slot.groups.length; gi < oldSlot.groups.length; gi++) {
+      slot.groups.push({ ...oldSlot.groups[gi], positions: oldSlot.groups[gi].positions.map(p => ({ ...p })) });
+    }
+  }
+  for (const o of old.slots) {
+    if (used.has(o)) continue;
+    if (o.manual) { ev.slots.push(o); continue; }
+    const people = namesIn(o);
+    if (people.length) changes.push({ level: 'attention', text: `"${o.label}" ${o.start}-${o.end} ירד מהלו"ז (היו משובצים: ${people.join(', ')})` });
+  }
+  ev.slots.sort((a, b) => toMinutes(a.start) - toMinutes(b.start));
+  ev.changes = changes;
 }
 
 /**
  * Merge a freshly parsed schedule into the current events.
- * Choices the user made (assignments, hidden events, notes) survive; old events
- * in the date range of the new file that are gone from it are dropped, unless the
- * user assigned someone there - those stay, marked as missing from the schedule.
+ * Choices the user made (assignments, hidden events, notes) survive; changes the
+ * coordinator made (times, names, dates) are applied and listed in the report.
+ * Old events in the date range of the new file that are gone from it are dropped,
+ * unless someone was assigned there - those stay, marked as missing.
+ * @returns {{events, added, updated, removed, kept, report: {evId, date, title, level, text}[]}}
  */
 export function mergeSchedule(oldEvents, newParsed) {
   const fresh = newParsed.map(toAppEvent);
-  if (!fresh.length) return { events: oldEvents, added: 0, updated: 0, removed: 0, kept: [] };
+  if (!fresh.length) return { events: oldEvents, added: 0, updated: 0, removed: 0, kept: [], report: [] };
   const dates = fresh.map(e => e.date).sort();
   const from = dates[0], to = dates[dates.length - 1];
-  const taken = new Set();
+  const { pairs, usedOld } = pairEvents(oldEvents, fresh, from, to);
   let added = 0, updated = 0;
 
   for (const ev of fresh) {
-    const old = findOldEvent(ev, oldEvents, taken);
-    if (!old) { added++; continue; }
-    taken.add(old);
+    const pair = pairs.get(ev);
+    if (!pair) {
+      added++;
+      // Nothing to report on the first import.
+      ev.changes = oldEvents.length ? [{ level: 'new', text: 'חדש בלו"ז' }] : [];
+      continue;
+    }
     updated++;
-    ev.ignored = old.ignored;
-    ev.note = old.note;
-    if (old.kindOverride) { ev.kind = old.kindOverride; ev.kindOverride = old.kindOverride; }
-    const usedSlots = new Set();
-    ev.slots.forEach((slot, i) => {
-      const oldSlot = findOldSlot(slot, i, old.slots, usedSlots);
-      if (!oldSlot) return;
-      usedSlots.add(oldSlot);
-      // The user's own edits to the shape of a slot win over the file.
-      if (oldSlot.edited) {
-        Object.assign(slot, { label: oldSlot.label, location: oldSlot.location, kind: oldSlot.kind, start: oldSlot.start, end: oldSlot.end, edited: true });
-        slot.groups = oldSlot.groups.map(g => ({ ...g, positions: g.positions.map(p => ({ ...p })) }));
-        return;
-      }
-      slot.groups.forEach((g, gi) => {
-        const og = oldSlot.groups[gi];
-        if (!og) return;
-        g.positions.forEach((p, pi) => {
-          const op = og.positions[pi];
-          if (op && op.name && (op.source === 'user' || op.source === 'auto' || !p.name)) Object.assign(p, op);
-        });
-        // Positions the user added beyond the file's.
-        for (let pi = g.positions.length; pi < og.positions.length; pi++) g.positions.push({ ...og.positions[pi] });
-      });
-      for (let gi = slot.groups.length; gi < oldSlot.groups.length; gi++) {
-        slot.groups.push({ ...oldSlot.groups[gi], positions: oldSlot.groups[gi].positions.map(p => ({ ...p })) });
-      }
-    });
-    // Slots the user added by hand.
-    for (const s of old.slots) if (s.manual && !usedSlots.has(s)) ev.slots.push(s);
+    mergeEvent(ev, pair.old, pair.moved);
   }
 
   const kept = [];
   let removed = 0;
   for (const o of oldEvents) {
-    if (taken.has(o)) continue;
+    if (usedOld.has(o)) continue;
     const inRange = o.date >= from && o.date <= to;
-    const hasUserWork = o.slots.some(s => s.groups.some(g => g.positions.some(p => p.name && p.source !== 'pdf')));
-    if (o.manual || !inRange) kept.push(o);
-    else if (hasUserWork) kept.push({ ...o, missingFromSchedule: true });
-    else removed++;
+    const people = o.slots.flatMap(namesIn);
+    if (o.manual || !inRange) kept.push({ ...o, changes: o.missingFromSchedule ? o.changes : [] });
+    else if (people.length && o.kind !== 'other' && !o.ignored) {
+      kept.push({
+        ...o,
+        missingFromSchedule: true,
+        changes: [{ level: 'attention', text: `לא מופיע בלו"ז העדכני (בוטל או הוזז?) - היו משובצים: ${[...new Set(people)].join(', ')}` }],
+      });
+    } else removed++;
   }
   const events = [...kept, ...fresh].sort((a, b) => a.date.localeCompare(b.date) || firstStart(a) - firstStart(b));
-  return { events, added, updated, removed, kept: kept.filter(e => e.missingFromSchedule) };
+  const report = events.flatMap(ev => (ev.changes || []).map(c => ({ evId: ev.id, date: ev.date, title: ev.title, ...c })));
+  return { events, added, updated, removed, kept: kept.filter(e => e.missingFromSchedule), report };
 }
 
 const firstStart = e => (e.slots.length ? Math.min(...e.slots.map(s => toMinutes(s.start))) : 24 * 60);

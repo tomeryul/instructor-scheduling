@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
   slotKinds: { lab: true, lecture: true, magic: true },
   month: 'all',
   onlyOpen: false,
+  onlyChanged: false,
   showHidden: false,
   showPast: false,
 };
@@ -51,6 +52,7 @@ function emptyState() {
     notes: { gaps: '', tasks: '' },
     exportOptions: clone(DEFAULT_EXPORT),
     imports: { roster: null, schedule: [] },
+    lastImport: null,
   };
 }
 
@@ -203,7 +205,39 @@ function eventShown(ev) {
   const s = state.settings;
   if (!eventMatches(ev, s)) return false;
   if (!s.showPast && ev.date < todayISO()) return false;
+  if (s.onlyChanged && !(ev.changes || []).length) return false;
   return true;
+}
+
+/** Changes from the last schedule update that matter here: relevant, not hidden, in a subject in view. */
+function relevantChanges() {
+  const li = state.lastImport;
+  if (!li || !li.report) return [];
+  const byId = new Map(state.events.map(e => [e.id, e]));
+  return li.report.filter(r => {
+    const ev = byId.get(r.evId);
+    return ev && !ev.ignored && isRelevant(ev) && visibleSlots(ev, state.settings).length;
+  });
+}
+
+function renderChanges() {
+  const li = state.lastImport;
+  if (!li || li.dismissed) return '';
+  const items = relevantChanges();
+  const when = new Date(li.at).toLocaleString('he-IL', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+  const head = `<div class="changes-head"><h2>מה השתנה בעדכון הלו"ז</h2><span class="small muted">${esc(li.name)} · ${esc(when)}</span>
+    <div class="changes-tools">${items.length ? `<label class="chip"><input type="checkbox" data-toggle="onlyChanged" ${state.settings.onlyChanged ? 'checked' : ''}>רק אירועים שהשתנו</label>` : ''}
+    <button class="btn btn-ghost btn-small" data-act="dismiss-changes">סגירה</button></div></div>`;
+  if (!items.length) return `<div class="panel changes">${head}<p class="small muted" style="margin:0">אין שינויים שנוגעים לשיבוצים או לאירועים שמוצגים כאן.</p></div>`;
+  const row = r => `<li class="chg-${r.level}"><button class="link" data-jump="${esc(r.evId)}">${esc(shortDate(r.date))}</button> ${esc(r.text)} <span class="muted">· ${esc(r.title.split('(')[0].trim().slice(0, 60))}</span></li>`;
+  const attention = items.filter(r => r.level === 'attention');
+  const fresh = items.filter(r => r.level === 'new');
+  const info = items.filter(r => r.level === 'info');
+  return `<div class="panel changes">${head}
+    ${attention.length ? `<h3>דורש בדיקה (${attention.length})</h3><ul>${attention.map(row).join('')}</ul>` : ''}
+    ${fresh.length ? `<h3>אירועים חדשים לשיבוץ (${fresh.length})</h3><ul>${fresh.map(r => row({ ...r, text: '' })).join('')}</ul>` : ''}
+    ${info.length ? `<details><summary>עדכונים שהלו"ז כבר מילא (${info.length})</summary><ul>${info.map(row).join('')}</ul></details>` : ''}
+  </div>`;
 }
 
 function slotsShown(ev) {
@@ -287,6 +321,7 @@ function renderBoard() {
         <div class="stat"><b>${shown.length}</b><span>אירועים</span></div>
         <div class="progress" title="${pct}% משובץ"><span style="width:${pct}%"></span></div>
         <div class="actions">
+          <label class="btn" title="ייבוא קובץ לו&quot;ז מעודכן - השיבוצים שלך נשמרים">עדכון לו"ז<input type="file" id="file-schedule-quick" accept=".pdf,application/pdf" hidden></label>
           ${autoUndo ? '<button class="btn" data-act="undo-auto">ביטול השיבוץ האוטומטי</button>' : ''}
           <button class="btn btn-primary" data-act="auto" ${open ? '' : 'disabled'}>שיבוץ אוטומטי של החסרים</button>
           <button class="btn" data-act="add-event">אירוע ידני</button>
@@ -328,6 +363,7 @@ function renderBoard() {
         <span><i style="background:var(--bad-soft);border-color:var(--bad)"></i>לא זמין/ה או כפילות</span>
       </div>
     </div>
+    ${renderChanges()}
     ${days.length ? days.map(d => `
       <section class="day">
         <div class="day-head"><h2>יום ${DAY_NAMES[weekday(d.date)]}</h2><span class="date">${shortDate(d.date)}</span>${d.date < today ? '<span class="past">עבר</span>' : ''}</div>
@@ -350,7 +386,8 @@ function renderEvent(ev, assignments) {
           <span class="tag tag-kind">${EVENT_KINDS[kind]}</span>
           ${subjects.map(t => `<span class="tag">${esc(t)}</span>`).join('')}
           ${hidden ? '<span class="tag">מוסתר</span>' : c.open ? `<span class="tag tag-open">חסרים ${c.open}</span>` : c.total ? '<span class="tag tag-done">שובץ</span>' : ''}
-          ${ev.missingFromSchedule ? '<span class="tag tag-warn" title="האירוע לא נמצא בקובץ הלו&quot;ז האחרון שיובא">לא מופיע בלו"ז העדכני</span>' : ''}
+          ${ev.missingFromSchedule ? '<span class="tag tag-warn" title="האירוע לא נמצא בקובץ הלו&quot;ז האחרון שיובא">לא מופיע בלו"ז העדכני</span>' : (ev.changes || []).some(c => c.level === 'attention') ? '<span class="tag tag-warn">השתנה</span>' : ''}
+          ${(ev.changes || []).some(c => c.level === 'new') ? '<span class="tag tag-new">חדש</span>' : ''}
           ${ev.manual ? '<span class="tag">ידני</span>' : ''}
         </div>
         <h3 class="ev-title clamp" data-act="expand" title="לחצו להצגת הכותרת המלאה">${esc(ev.title || '(ללא כותרת)')}</h3>
@@ -359,9 +396,11 @@ function renderEvent(ev, assignments) {
         <button class="btn btn-ghost btn-small" data-act="note">${ev.note ? 'עריכת הערה' : 'הערה'}</button>
         ${ev.raw ? '<button class="btn btn-ghost btn-small" data-act="raw">טקסט מהלו"ז</button>' : ''}
         <button class="btn btn-ghost btn-small" data-act="add-slot">משבצת</button>
+        ${ev.missingFromSchedule || ev.manual ? '<button class="btn btn-ghost btn-small btn-danger" data-act="delete-event">מחיקה</button>' : ''}
         ${hidden ? `<button class="btn btn-ghost btn-small" data-act="unhide">${ev.ignored ? 'החזרה לשיבוץ' : 'סימון כרלוונטי'}</button>` : '<button class="btn btn-ghost btn-small" data-act="hide">הסתרה</button>'}
       </div>
     </div>
+    ${(ev.changes || []).some(c => c.level !== 'new') ? `<ul class="ev-changes">${ev.changes.filter(c => c.level !== 'new').map(c => `<li class="chg-${c.level}">${esc(c.text)}</li>`).join('')}</ul>` : ''}
     ${slots.length ? `<ol class="slots">${slots.map(sl => renderSlot(ev, sl, assignments)).join('')}</ol>` : '<p class="muted small" style="margin:0 14px 12px">אין משבצות שדורשות מדריכים. אפשר להוסיף משבצת ידנית.</p>'}
     ${ev.note ? `<p class="ev-note">${esc(ev.note)}</p>` : ''}
     <pre class="raw" hidden>${esc(ev.raw || '')}</pre>
@@ -865,6 +904,7 @@ async function importSchedule(file) {
     if (!cells.length) throw new Error('לא נמצאו תאים עם תאריכים. האם זה קובץ הלו"ז השבועי?');
     leaveDemo();
     const parsed = parseCells(cells, createNameMatcher(people().map(p => p.name)));
+    const firstImport = !state.events.some(e => !e.manual);
     const result = mergeSchedule(state.events, parsed);
     state.events = result.events;
     const dates = parsed.map(e => e.date).sort();
@@ -873,7 +913,12 @@ async function importSchedule(file) {
     let text = `נמצאו ${parsed.length} תאים, מהם ${relevant} ימי עיון וקורסים עם משבצות לשיבוץ. חדשים: ${result.added}, עודכנו: ${result.updated}${result.removed ? `, הוסרו: ${result.removed}` : ''}.`;
     if (result.kept.length) text += ` ${result.kept.length} אירועים ששובצו בעבר לא מופיעים בקובץ החדש ומסומנים בלוח.`;
     if (warnings.length) text += ' ' + warnings.join(' ');
+    // On the first import everything is new; the report starts with the next update.
+    state.lastImport = { name: file.name, at: new Date().toISOString(), report: result.report, dismissed: firstImport };
+    const attention = relevantChanges().filter(r => r.level === 'attention').length;
+    if (attention) text += ` ${attention} שינויים דורשים בדיקה - מפורטים בלשונית "שיבוץ".`;
     notices.schedule = { text };
+    if (view === 'board' && result.report.length) toast(attention ? `הלו"ז עודכן - ${attention} שינויים דורשים בדיקה` : 'הלו"ז עודכן');
     // Start from the first month of the new file.
     const firstMonth = dates[0]?.slice(0, 7);
     if (firstMonth && state.settings.month !== 'all' && state.settings.month !== firstMonth) state.settings.month = firstMonth;
@@ -918,10 +963,32 @@ function go(v) {
   window.scrollTo({ top: 0 });
 }
 
+/** Scroll to an event's card, widening the filters if they hide it. */
+function jumpTo(evId) {
+  const find = () => document.querySelector(`[data-ev="${CSS.escape(evId)}"]`);
+  let card = find();
+  if (!card) {
+    const ev = findEvent(evId);
+    if (!ev) return;
+    const s = state.settings;
+    s.month = 'all';
+    s.onlyOpen = false;
+    if (ev.date < todayISO()) s.showPast = true;
+    commit();
+    card = find();
+  }
+  if (!card) { toast('האירוע מוסתר בסינון הנוכחי'); return; }
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.add('flash');
+  setTimeout(() => card.classList.remove('flash'), 1600);
+}
+
 // ---------------------------------------------------------------- events
 
 document.addEventListener('click', async e => {
   const t = e.target;
+  const jump = t.closest('[data-jump]');
+  if (jump) { jumpTo(jump.dataset.jump); return; }
   const goBtn = t.closest('[data-go]');
   if (goBtn) { go(goBtn.dataset.go); return; }
   const tab = t.closest('.tab');
@@ -967,6 +1034,16 @@ document.addEventListener('click', async e => {
     case 'expand': actEl.classList.toggle('clamp'); break;
     case 'raw': evEl.querySelector('.raw').hidden = !evEl.querySelector('.raw').hidden; break;
     case 'note': noteEditor(ev); break;
+    case 'dismiss-changes':
+      if (state.lastImport) state.lastImport.dismissed = true;
+      state.settings.onlyChanged = false;
+      commit();
+      break;
+    case 'delete-event':
+      state.events = state.events.filter(x => x !== ev);
+      commit();
+      toast('האירוע נמחק');
+      break;
     case 'hide': ev.ignored = true; commit(); toast('האירוע הוסתר. אפשר להחזיר אותו דרך "הצג מוסתרים".'); break;
     case 'unhide':
       if (ev.ignored) ev.ignored = false;
@@ -1067,7 +1144,9 @@ document.addEventListener('change', e => {
   if (t.dataset.section) { state.exportOptions.sections[t.dataset.section] = t.checked; commit(); return; }
 
   if (t.id === 'file-roster' && t.files[0]) importRoster(t.files[0]);
-  if (t.id === 'file-schedule' && t.files[0]) importSchedule(t.files[0]);
+  if ((t.id === 'file-schedule' || t.id === 'file-schedule-quick') && t.files[0]) importSchedule(t.files[0]);
+  // The schedule file often keeps its name; clearing lets the same file be picked again.
+  if (t.type === 'file') setTimeout(() => { t.value = ''; }, 0);
   if (t.id === 'file-backup' && t.files[0]) restoreBackup(t.files[0]);
 });
 

@@ -91,3 +91,68 @@ test('export: lines in the "משימות" format with ? for open positions', () 
   assert.doesNotMatch(doc, /ביולוגיה/);
   assert.equal(courseName("סביון שכבה ח (100 תל')- מפגש 1."), 'סביון שכבה ח');
 });
+
+// A schedule that changes from day to day: the user's choices and the coordinator's edits.
+const school = 'יום עיון בכימיה לתיכון הדר רמלה';
+const dayCells = (date, lab, magic) => [{ date, lines: [school, lab, magic] }];
+const LAB = '10:30-12:00 - מעבדה בכימיה. מדריכים: ?+?';
+const MAGIC = '12:30-13:15 - מופע קסמים. מדריך: ?';
+
+function assignedDay() {
+  const { events } = mergeSchedule([], parseCells(dayCells('2026-11-16', LAB, MAGIC), matcher));
+  // As the picker does it: the position object is updated, not replaced.
+  Object.assign(events[0].slots[0].groups[0].positions[0], { name: 'רון אלמוג', source: 'user' });
+  Object.assign(events[0].slots[1].groups[0].positions[0], { name: 'דנה לוי', source: 'user' });
+  return events;
+}
+const names = ev => ev.slots.map(s => s.groups.flatMap(g => g.positions.map(p => p.name)));
+
+test('daily update: changed times keep the assignments and are reported', () => {
+  const r = mergeSchedule(assignedDay(), parseCells(dayCells('2026-11-16', '10:00-11:30 - מעבדה בכימיה. מדריכים: ?+?', '12:00-12:45 - מופע קסמים. מדריך: ?'), matcher));
+  assert.deepEqual(names(r.events[0]), [['רון אלמוג', null], ['דנה לוי']]);
+  assert.equal(r.report.filter(x => x.level === 'attention').length, 2);
+  assert.match(r.report[0].text, /10:30-12:00 ← 10:00-11:30/);
+});
+
+test('daily update: a name the coordinator wrote replaces the user\'s and is reported', () => {
+  const r = mergeSchedule(assignedDay(), parseCells(dayCells('2026-11-16', '10:30-12:00 - מעבדה בכימיה. מדריכים: תמר גל+?', MAGIC), matcher));
+  assert.deepEqual(names(r.events[0]), [['תמר גל', null], ['דנה לוי']]);
+  assert.match(r.report.find(x => x.level === 'attention').text, /תמר גל במקום רון אלמוג/);
+  // The next update with the same file keeps it quiet.
+  const again = mergeSchedule(r.events, parseCells(dayCells('2026-11-16', '10:30-12:00 - מעבדה בכימיה. מדריכים: תמר גל+?', MAGIC), matcher));
+  assert.equal(again.report.length, 0);
+});
+
+test('daily update: the user\'s choice stands while the file says the same as before', () => {
+  const events = mergeSchedule([], parseCells(dayCells('2026-11-16', '10:30-12:00 - מעבדה בכימיה. מדריכים: תמר גל+?', MAGIC), matcher)).events;
+  Object.assign(events[0].slots[0].groups[0].positions[0], { name: 'רון אלמוג', source: 'user' });
+  const r = mergeSchedule(events, parseCells(dayCells('2026-11-16', '10:30-12:00 - מעבדה בכימיה. מדריכים: תמר גל+?', MAGIC), matcher));
+  assert.equal(r.events[0].slots[0].groups[0].positions[0].name, 'רון אלמוג');
+});
+
+test('daily update: a name removed from the file is not put back', () => {
+  const events = mergeSchedule([], parseCells(dayCells('2026-11-16', '10:30-12:00 - מעבדה בכימיה. מדריכים: תמר גל+?', MAGIC), matcher)).events;
+  const r = mergeSchedule(events, parseCells(dayCells('2026-11-16', LAB, MAGIC), matcher));
+  assert.deepEqual(names(r.events[0]), [[null, null], [null]]);
+  assert.match(r.report[0].text, /תמר גל הוסר/);
+});
+
+test('daily update: a study day moved to another date takes its assignments along', () => {
+  const r = mergeSchedule(assignedDay(), parseCells([
+    ...dayCells('2026-11-18', LAB, MAGIC),
+    { date: '2026-11-16', lines: ['יום עיון בכימיה לתיכון אחר', '10:00-11:00 - מעבדה. מדריכים: ?+?'] },
+  ], matcher));
+  const moved = r.events.find(e => e.date === '2026-11-18');
+  assert.deepEqual(names(moved), [['רון אלמוג', null], ['דנה לוי']]);
+  assert.match(moved.changes[0].text, /הוזז מ-16\/11 ל-18\/11/);
+  const other = r.events.find(e => e.date === '2026-11-16');
+  assert.deepEqual(names(other), [[null, null]]);
+  assert.equal(other.changes[0].level, 'new');
+});
+
+test('daily update: a cancelled day with assignments stays, flagged', () => {
+  const r = mergeSchedule(assignedDay(), parseCells([{ date: '2026-11-17', lines: ['יום עיון בכימיה לתיכון אחר', '10:00-11:00 - מעבדה. מדריכים: ?+?'] }, { date: '2026-11-15', lines: ['יום עיון בכימיה לתיכון שלישי', '10:00-11:00 - מעבדה. מדריכים: ?+?'] }], matcher));
+  const gone = r.events.find(e => e.date === '2026-11-16');
+  assert.equal(gone.missingFromSchedule, true);
+  assert.match(gone.changes[0].text, /רון אלמוג, דנה לוי/);
+});
