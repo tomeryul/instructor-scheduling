@@ -12,7 +12,7 @@ import {
 import { buildDocument, toHtml, toPlainText, toDocxBlob, dayLabel, shortDate, monthLabel } from './export.js';
 import { openStore, saveFile, loadScript } from './storage.js';
 import { stampChanges, mergeStates, describeChanges, packState, unpackState, sharedState } from './sync.js';
-import { parseRepo, checkRepo, readFile, writeFile, connectLink, readConnectLink, DEFAULT_PATH } from './github-sync.js';
+import { parseRepo, checkRepo, readFile, writeFile, deleteFile, connectLink, readConnectLink, DEFAULT_PATH } from './github-sync.js';
 import { demoState } from './demo.js';
 import { icon } from './icons.js';
 
@@ -1058,6 +1058,7 @@ function renderFiles() {
     </section>
     <section class="list-section">
       <div class="list">
+        ${syncOn() ? `<button class="row action destructive" data-act="sync-delete">${icon('trash')}<span class="row-main">מחיקת הנתונים מ-GitHub</span></button>` : ''}
         <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">מחיקת כל הנתונים מהמכשיר הזה</span></button>
       </div>
     </section>`;
@@ -1332,7 +1333,7 @@ const syncState = { busy: null, pending: null, queued: null, error: null, timer:
 const syncOn = () => !!syncCfg && store?.kind === 'local';
 const syncAuto = () => syncOn() && !!syncCfg.auto;
 const saveSyncCfg = () => writeLocal(SYNC_KEY, syncCfg);
-const BUSY_TEXT = { push: 'שומר ב-GitHub…', pull: 'מייבא מ-GitHub…', both: 'מסנכרן…', check: 'בודק אם יש עדכון…' };
+const BUSY_TEXT = { push: 'שומר ב-GitHub…', pull: 'מייבא מ-GitHub…', both: 'מסנכרן…', check: 'בודק אם יש עדכון…', delete: 'מוחק מ-GitHub…' };
 
 // Two requests combined: the same, the one that does more, or both directions.
 const strongest = (a, b) => (!a ? b : !b ? a : a === b ? a : a === 'check' ? b : b === 'check' ? a : 'both');
@@ -1407,6 +1408,7 @@ async function runSync(mode = 'both', { manual = false } = {}) {
         if (!incoming) throw new Error('הקובץ ב-GitHub לא נראה כמו קובץ של האתר');
         Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming), remoteDevice: remote.data.device || null, remoteAt: remote.data.savedAt || null });
       } else if (!remote) {
+        if (cfg.sha) cfg.cleanHash = null;
         Object.assign(cfg, { sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null });
       }
       const news = !!cfg.sha && cfg.sha !== cfg.importedSha;
@@ -1458,7 +1460,7 @@ async function runSync(mode = 'both', { manual = false } = {}) {
     cfg.at = new Date().toISOString();
     syncState.error = null;
     const waiting = leftUnimported ? ` · יש שם גם עדכון מ-${isolate(cfg.remoteDevice || 'מכשיר אחר')} שעוד לא יובא לכאן` : '';
-    if (mode === 'pull' && manual) toast(imported || 'אין חדש ב-GitHub - המכשיר הזה כבר מעודכן');
+    if (mode === 'pull' && manual) toast(imported || (cfg.sha ? 'אין חדש ב-GitHub - המכשיר הזה כבר מעודכן' : 'ב-GitHub אין כרגע נתונים לייבוא'));
     else if (mode === 'push' && manual) toast((wrote ? 'נשמר ב-GitHub' : 'כבר שמור ב-GitHub - אין שינויים חדשים') + waiting);
     else if (mode === 'both' && manual) toast([imported, wrote ? 'נשמר ב-GitHub' : ''].filter(Boolean).join(' · ') || 'הכול מסונכרן - אין שינויים');
     else if (imported) toast(imported);
@@ -1480,6 +1482,7 @@ function syncSummary() {
   if (e && e.code === 'offline') return 'אין חיבור לאינטרנט. העבודה שמורה במכשיר הזה.';
   if (e) return `הפעולה האחרונה נכשלה: ${e.message}`;
   const f = syncFlags();
+  if (!syncCfg.sha) return demo || !hasData(state) ? 'ב-GitHub אין כרגע נתונים.' : 'ב-GitHub אין כרגע נתונים. "שמירה" תעלה לשם את מה שיש במכשיר הזה.';
   const lines = [f.unsaved ? 'יש במכשיר הזה שינויים שלא נשמרו ב-GitHub.' : 'כל העבודה במכשיר הזה שמורה ב-GitHub.'];
   if (f.news) lines.push(`יש עדכון מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` (${whenLabel(syncCfg.remoteAt)})` : ''} שעוד לא יובא.`);
   return lines.join(' ');
@@ -1676,6 +1679,42 @@ async function syncShare() {
   }
 }
 
+/** Delete the data file from GitHub. This device keeps its data; automatic sync is turned off so it does not write it back. */
+async function syncDeleteRemote() {
+  if (!syncOn()) return;
+  if (syncState.busy) { toast('רגע - פעולה אחרת מול GitHub עדיין רצה'); return; }
+  const cfg = syncCfg;
+  const wasAuto = !!cfg.auto;
+  clearTimeout(syncState.timer);
+  Object.assign(syncState, { queued: null, pending: null, busy: 'delete' });
+  renderSyncBits();
+  try {
+    let deleted = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const remote = await readFile(cfg);
+      if (!remote) break;
+      try {
+        deleted = await deleteFile(cfg, remote.sha, `מחיקת הנתונים מ-${device.name}`);
+        break;
+      } catch (e) {
+        if (e.code !== 'conflict' || attempt === 2) throw e; // someone saved in between: read again and delete that
+      }
+    }
+    Object.assign(cfg, { auto: false, sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null, importedSha: null, cleanHash: null });
+    syncState.error = null;
+    toast(deleted
+      ? `הנתונים נמחקו מ-GitHub. במכשיר הזה הם נשארו${wasAuto ? ', והסנכרון האוטומטי כובה' : ''}.`
+      : 'ב-GitHub כבר לא היו נתונים.');
+  } catch (e) {
+    syncState.error = e;
+    toast('המחיקה נכשלה: ' + e.message);
+  } finally {
+    if (syncCfg === cfg) saveSyncCfg();
+    syncState.busy = null;
+    render();
+  }
+}
+
 function syncOff() {
   syncCfg = null;
   saveSyncCfg();
@@ -1864,6 +1903,16 @@ document.addEventListener('click', async e => {
     case 'sync-push': runSync('push', { manual: true }); break;
     case 'sync-pull': runSync('pull', { manual: true }); break;
     case 'sync-both': runSync('both', { manual: true }); break;
+    case 'sync-delete':
+      openAlert({
+        title: 'למחוק את הנתונים מ-GitHub?',
+        message: `קובץ הנתונים יימחק מהריפו ${isolate(`${syncCfg.owner}/${syncCfg.repo}`)}. במכשיר הזה הנתונים נשארים${syncCfg.auto ? ', והסנכרון האוטומטי ייכבה' : ''}. מכשיר אחר שעדיין מחובר יעלה אותם שוב אם ילחצו בו "שמירה" או אם מופעל בו סנכרון אוטומטי. GitHub שומר גרסאות קודמות בהיסטוריה של הריפו; למחיקה מוחלטת מוחקים את הריפו עצמו בהגדרות שלו.`,
+        actions: [
+          { label: 'ביטול', cls: 'btn-gray' },
+          { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: syncDeleteRemote },
+        ],
+      });
+      break;
     case 'sync-share': syncShare(); break;
     case 'sync-off': syncOff(); break;
     case 'reset':
