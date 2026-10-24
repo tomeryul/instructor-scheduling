@@ -25,7 +25,8 @@
 
 אתר סטטי, בלי שרת ובלי התקנה. הנתונים נשמרים בדפדפן (או בחשבון claude.ai כשהאתר פתוח שם). בלשונית "קבצים" יש גיבוי ושחזור.
 
-- **GitHub Pages**: Settings → Pages → Deploy from branch → תיקיית השורש.
+- **GitHub Pages**: Settings → Pages → Source: "Deploy from a branch" → בוחרים את הענף ואת התיקייה `/ (root)` → Save. אחרי דקה-שתיים האתר עולה בכתובת `https://<שם-המשתמש>.github.io/instructor-scheduling/`.
+  - ב-GitHub החינמי, Pages עובד רק ל-repo ציבורי (ל-repo פרטי צריך GitHub Pro). אין בקוד נתונים אישיים: הקבצים שמייבאים נשארים בדפדפן של מי שמשתמש באתר ולא עולים ל-GitHub.
 - **מקומית**: `npm start` (או `python3 -m http.server 8000`) ואז http://localhost:8000. פתיחה ישירה של `index.html` מהקובץ לא תעבוד, כי הדפדפן חוסם מודולים מ-`file://`.
 
 ## למפתחים
@@ -42,7 +43,7 @@ js/scheduling.js      מיזוג ייבוא חוזר, התנגשויות, דיר
 js/export.js          מסמך הייצוא (Word / טקסט / תצוגה)
 js/storage.js         שמירה (localStorage או claude.ai) והורדת קבצים
 js/demo.js            נתוני הדוגמה (שמות מומצאים)
-vendor/               pdf.js 4.10.38 (בקובץ ה-worker תווי בקרה בתוך מחרוזות הוחלפו ב-\xNN, אותה משמעות)
+vendor/               pdf.js 4.10.38 בסיומת .js (בקובץ ה-worker תווי בקרה בתוך מחרוזות הוחלפו ב-\xNN, אותה משמעות)
 ```
 
 בדיקות: `npm test` (Node 20 ומעלה, בלי תלויות).

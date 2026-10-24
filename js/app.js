@@ -815,8 +815,8 @@ function renderFiles() {
 let pdfjsPromise = null;
 function loadPdfjs() {
   if (!pdfjsPromise) {
-    pdfjsPromise = import(new URL('../vendor/pdf.min.mjs', import.meta.url).href).then(lib => {
-      lib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.mjs', import.meta.url).href;
+    pdfjsPromise = import(new URL('../vendor/pdf.min.js', import.meta.url).href).then(lib => {
+      lib.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdf.worker.min.js', import.meta.url).href;
       return lib;
     }).catch(e => { pdfjsPromise = null; throw e; });
   }
