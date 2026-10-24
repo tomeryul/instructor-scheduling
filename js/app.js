@@ -129,11 +129,10 @@ function persist() {
   if (demo) return;
   if (stampChanges(snapshot, state)) state.updatedAt = Date.now();
   snapshot = clone(state);
-  syncState.autoPushes = 0;
   dirty = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flush, 500);
-  scheduleSync();
+  noteLocalChange();
 }
 
 function commit() {
@@ -152,6 +151,7 @@ function markDeleted(kind, id) {
 function replaceState(next) {
   state = withDefaults(next);
   snapshot = clone(state);
+  syncState.localHash = sharedHash(state);
   personIndex = null;
   autoUndo = null;
   render();
@@ -272,7 +272,12 @@ let menuScrollY = 0;
 function openMenu(anchor, items) {
   const m = $('#menu');
   menuHandlers = items;
-  m.innerHTML = items.map((it, i) => (it === '-' ? '<hr>' : `<button role="menuitem" data-menu="${i}" class="${it.destructive ? 'destructive' : ''}">${esc(it.label)}${icon(it.icon)}</button>`)).join('');
+  m.innerHTML = items.map((it, i) => {
+    if (it === '-') return '<hr>';
+    if (it.header) return `<p class="menu-header">${esc(it.header)}</p>`;
+    const label = it.sub ? `<span class="menu-label">${esc(it.label)}<small>${esc(it.sub)}</small></span>` : esc(it.label);
+    return `<button role="menuitem" data-menu="${i}" class="${it.destructive ? 'destructive' : ''}" ${it.disabled ? 'disabled' : ''}>${label}${icon(it.icon)}</button>`;
+  }).join('');
   m.hidden = false;
   const r = anchor.getBoundingClientRect();
   const w = m.offsetWidth, h = m.offsetHeight;
@@ -282,7 +287,7 @@ function openMenu(anchor, items) {
   m.style.top = `${top}px`;
   m.style.left = `${left}px`;
   menuScrollY = window.scrollY;
-  m.querySelector('button')?.focus({ preventScroll: true });
+  m.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
 }
 
 function closeMenu() {
@@ -1069,14 +1074,21 @@ function devicesSection() {
   if (syncCfg) {
     return `
     <section class="list-section">
-      <h3 class="list-header">סנכרון אוטומטי</h3>
+      <h3 class="list-header">סנכרון עם GitHub</h3>
       <div class="list">
         <div class="row" id="sync-status">${syncStatusHtml()}</div>
-        <button class="row action" data-act="sync-now">${icon('arrow.clockwise')}<span class="row-main">סנכרון עכשיו</span></button>
+        <button class="row action" data-act="sync-push" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main"><span class="row-title">שמירה ל-GitHub</span><span class="row-sub">בסוף עבודה: שולח את מה שנעשה במכשיר הזה</span></span></button>
+        <button class="row action" data-act="sync-pull">${icon('square.and.arrow.down')}<span class="row-main"><span class="row-title">ייבוא מ-GitHub</span><span class="row-sub">בתחילת עבודה: מביא את מה שנשמר במכשירים אחרים</span></span></button>
+        <button class="row action" data-act="sync-both">${icon('arrow.triangle.2.circlepath')}<span class="row-main"><span class="row-title">סנכרון</span><span class="row-sub">ייבוא ושמירה בלחיצה אחת</span></span></button>
+        <label class="row"><span class="row-main"><span class="row-title">סנכרון אוטומטי</span><span class="row-sub">שומר ומייבא לבד, בלי ללחוץ</span></span><input type="checkbox" role="switch" class="switch" id="sync-auto" ${syncCfg.auto ? 'checked' : ''}></label>
+      </div>
+      <p class="list-footer">כל שינוי נשמר במכשיר הזה מיד, גם בלי ללחוץ על כלום. "שמירה" ו"ייבוא" מעבירים עבודה בין המכשיר הזה ל-GitHub, והם זמינים בכל מסך בכפתור החצים שבראש המסך. שום דבר לא נדרס: בכל עמדה נשאר השיבוץ האחרון שנעשה, באיזה מכשיר שלא יהיה.</p>
+    </section>
+    <section class="list-section">
+      <div class="list">
         <button class="row action" data-act="sync-share">${icon('qrcode')}<span class="row-main">חיבור מכשיר נוסף</span>${chevron()}</button>
         <button class="row action" data-act="sync-off">${icon('xmark.circle.fill')}<span class="row-main">ניתוק המכשיר הזה</span></button>
       </div>
-      <p class="list-footer">כל שינוי נשמר כאן מיד ונשלח ל-GitHub תוך שניות, ומכשיר שנפתח מביא אותו. שינויים משני מכשירים מתמזגים: בכל עמדה נשאר השיבוץ האחרון שנעשה.</p>
     </section>`;
   }
   const iosTip = isIOS() && !isStandalone()
@@ -1250,9 +1262,15 @@ async function askToPersist() {
 // ---------------------------------------------------------------- moving work between devices in a file
 
 async function sendToDevice() {
+  const hash = syncState.localHash;
   const text = JSON.stringify(packState(state, device.name));
   const filename = `שיבוץ מדריכים ${todayISO()} ${device.name}.json`;
-  const sent = () => { device.sent = new Date().toISOString(); saveDevice(); if (view === 'files') renderFiles(); };
+  const sent = () => {
+    Object.assign(device, { sent: new Date().toISOString(), sentHash: hash });
+    saveDevice();
+    renderSyncBits();
+    if (view === 'files') renderFiles();
+  };
   // Phones: the share sheet (WhatsApp to yourself, mail, AirDrop, Files). Some browsers only share .txt.
   if (isTouch() && navigator.canShare) {
     for (const [ext, type] of [['json', 'application/json'], ['txt', 'text/plain']]) {
@@ -1262,8 +1280,17 @@ async function sendToDevice() {
     }
   }
   try {
-    if (await saveFile(filename, text) === 'saved') { sent(); toast('הקובץ ירד. במכשיר השני: קבצים ← "קבלה ממכשיר אחר"'); }
+    if (await saveFile(filename, text) === 'saved') { sent(); toast('הקובץ ירד. במכשיר השני: קבלה ממכשיר אחר'); }
   } catch (e) { toast('ההורדה נכשלה: ' + (e.message || e.code)); }
+}
+
+/** Choose a file sent from another device (from a menu, where there is no file field). */
+function pickReceiveFile() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,.txt,application/json,text/plain';
+  input.addEventListener('change', () => { if (input.files[0]) receiveFile(input.files[0]); });
+  input.click();
 }
 
 async function receiveFile(file) {
@@ -1273,31 +1300,42 @@ async function receiveFile(file) {
   if (!incoming) { toast('זה לא קובץ שנשלח מהאתר'); return; }
   const from = data.device || 'הקובץ';
   const wasDemo = demo;
+  const wasClean = !wasDemo && syncState.localHash === device.sentHash;
+  const sentHashBefore = device.sentHash;
   leaveDemo();
   const before = clone(state);
   const merged = mergeStates(state, incoming);
   const text = changesText(describeChanges(before, merged), from);
+  replaceState(merged);
+  // Nothing was waiting to be sent, and what arrived is already on the other device: still nothing to send.
+  if (wasClean || wasDemo) device.sentHash = syncState.localHash;
   device.received = { at: new Date().toISOString(), from };
   saveDevice();
-  replaceState(merged);
+  renderSyncBits();
   askToPersist();
-  scheduleSync();
   if (!text) { toast(`אין חדש מ-${isolate(from)} - המכשיר הזה כבר מעודכן`); return; }
-  toast(text, wasDemo ? null : { label: 'ביטול', run: () => { replaceState(before); scheduleSync(); toast('הקבלה בוטלה'); } });
+  toast(text, wasDemo ? null : {
+    label: 'ביטול',
+    run: () => { replaceState(before); device.sentHash = sentHashBefore; saveDevice(); renderSyncBits(); toast('הקבלה בוטלה'); },
+  });
 }
 
-// ---------------------------------------------------------------- automatic sync through GitHub
+// ---------------------------------------------------------------- sync through GitHub: save, import, or both
 
-let syncCfg = readLocal(SYNC_KEY); // { owner, repo, path, token, sha, etag, remoteHash, at }
-const syncState = { busy: false, pending: false, error: null, timer: null, autoPushes: 0 };
+// syncCfg: { owner, repo, path, token, auto,
+//   sha, etag, remoteHash, remoteDevice, remoteAt - the file as last seen, who wrote it and when;
+//   importedSha - the version of the file last brought into this device;
+//   cleanHash - this device's data as it was last saved (or when it had nothing unsaved);
+//   savedAt, importedAt, at }
+let syncCfg = readLocal(SYNC_KEY);
+const syncState = { busy: null, pending: null, queued: null, error: null, timer: null, autoPushes: 0, localHash: null };
 const syncOn = () => !!syncCfg && store?.kind === 'local';
+const syncAuto = () => syncOn() && !!syncCfg.auto;
 const saveSyncCfg = () => writeLocal(SYNC_KEY, syncCfg);
+const BUSY_TEXT = { push: 'שומר ב-GitHub…', pull: 'מייבא מ-GitHub…', both: 'מסנכרן…', check: 'בודק אם יש עדכון…' };
 
-function scheduleSync(delay = 2500) {
-  if (!syncOn()) return;
-  clearTimeout(syncState.timer);
-  syncState.timer = setTimeout(syncNow, delay);
-}
+// Two requests combined: the same, the one that does more, or both directions.
+const strongest = (a, b) => (!a ? b : !b ? a : a === b ? a : a === 'check' ? b : b === 'check' ? a : 'both');
 
 // Never swap the data under an open sheet, menu or a field being typed in.
 const uiBusy = () => $('#dialog').open || $('#alert').open || !!menuHandlers
@@ -1312,104 +1350,242 @@ function hashText(str) {
 }
 const sharedHash = s => hashText(canon(sharedState(s)));
 
-/** Pull the file, merge it in, and push what this device has that the file lacks. */
-async function syncNow() {
+/** Called after every change on this device. */
+function noteLocalChange() {
+  syncState.localHash = sharedHash(state);
+  syncState.autoPushes = 0;
+  renderSyncBits();
+  if (syncAuto()) scheduleSync('both');
+}
+
+/** What is waiting: work on this device that was not saved, or work in the file that was not imported here. */
+function syncFlags() {
+  if (store?.kind !== 'local' || demo || !hasData(state)) return { unsaved: false, news: false };
+  if (syncOn()) return { unsaved: syncState.localHash !== syncCfg.cleanHash, news: !!syncCfg.sha && syncCfg.sha !== syncCfg.importedSha };
+  // Without GitHub, only once files have gone between devices - one device on its own is never "unsaved".
+  const usesFiles = !!(device.sentHash || device.received);
+  return { unsaved: usesFiles && syncState.localHash !== device.sentHash, news: false };
+}
+
+function scheduleSync(mode = 'both', delay = 2500) {
   if (!syncOn()) return;
-  if (syncState.busy || uiBusy()) { syncState.pending = true; return; }
+  syncState.queued = strongest(syncState.queued, mode);
+  clearTimeout(syncState.timer);
+  syncState.timer = setTimeout(() => { const m = syncState.queued; syncState.queued = null; runSync(m); }, delay);
+}
+
+function resumePending(delay = 800) {
+  if (!syncState.pending || syncState.busy) return;
+  const m = syncState.pending;
+  syncState.pending = null;
+  scheduleSync(m, delay);
+}
+
+/**
+ * push  - save: write this device's work into the file (merged with anything
+ *         there this device has not imported, so nothing is lost);
+ * pull  - import: merge the file into this device;
+ * both  - sync: import, then save;
+ * check - only look whether the file changed, for the "update waiting" mark.
+ */
+async function runSync(mode = 'both', { manual = false } = {}) {
+  if (!syncOn()) return;
+  if (syncState.busy) { syncState.pending = strongest(syncState.pending, mode); return; }
   const cfg = syncCfg;
-  syncState.busy = true;
-  syncState.pending = false;
-  renderSyncStatus();
+  syncState.busy = mode;
+  renderSyncBits();
+  let imported = '';
+  let wrote = false;
+  let leftUnimported = false;
   try {
     for (let attempt = 0; ; attempt++) {
+      if (attempt > 6) throw new Error('GitHub לא הגיב כמצופה - נסו שוב');
       const remote = await readFile(cfg, cfg.sha && cfg.remoteHash ? cfg.etag : null);
+      let incoming = null;
       if (remote && !remote.notModified) {
-        const incoming = unpackState(remote.data);
+        incoming = unpackState(remote.data);
         if (!incoming) throw new Error('הקובץ ב-GitHub לא נראה כמו קובץ של האתר');
-        if (remote.sha !== cfg.sha) {
-          if (uiBusy()) { syncState.pending = true; return; }
-          const wasDemo = demo && hasData(withDefaults(incoming));
-          if (wasDemo) leaveDemo();
-          if (!demo) {
-            const before = clone(state);
-            const merged = mergeStates(state, incoming);
-            if (canon(sharedState(merged)) !== canon(sharedState(before))) {
-              replaceState(merged);
-              const text = wasDemo ? `הנתונים נטענו מ-${isolate(`${cfg.owner}/${cfg.repo}`)}` : changesText(describeChanges(before, merged), remote.data.device || 'מכשיר אחר');
-              if (text) toast(text);
-            }
+        Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming), remoteDevice: remote.data.device || null, remoteAt: remote.data.savedAt || null });
+      } else if (!remote) {
+        Object.assign(cfg, { sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null });
+      }
+      const news = !!cfg.sha && cfg.sha !== cfg.importedSha;
+      if (mode === 'check') break;
+      if (news && !incoming) { cfg.etag = null; continue; } // the file changed: read it in full
+
+      if ((mode === 'pull' || mode === 'both') && news) {
+        if (uiBusy()) { syncState.pending = strongest(syncState.pending, mode); return; }
+        const wasDemo = demo && hasData(withDefaults(incoming));
+        if (wasDemo) leaveDemo();
+        if (!demo) {
+          const wasClean = wasDemo || syncState.localHash === cfg.cleanHash;
+          const before = clone(state);
+          const merged = mergeStates(state, incoming);
+          if (canon(sharedState(merged)) !== canon(sharedState(before))) {
+            replaceState(merged);
+            imported = wasDemo ? `הנתונים נטענו מ-${isolate(`${cfg.owner}/${cfg.repo}`)}` : changesText(describeChanges(before, merged), cfg.remoteDevice || 'מכשיר אחר');
+          }
+          if (wasClean) cfg.cleanHash = syncState.localHash;
+          cfg.importedAt = new Date().toISOString();
+        }
+        cfg.importedSha = cfg.sha;
+      }
+
+      if (mode === 'push' || mode === 'both') {
+        if (demo) break; // never write the sample data
+        const unimported = !!cfg.sha && cfg.sha !== cfg.importedSha;
+        const out = unimported ? mergeStates(state, incoming) : state;
+        const outHash = unimported ? sharedHash(out) : syncState.localHash;
+        // Automatic runs stop after a few writes without a new edit, so two devices cannot bounce a change.
+        if (outHash !== cfg.remoteHash && (manual || syncState.autoPushes < 4)) {
+          if (!manual) syncState.autoPushes++;
+          try {
+            const sha = await writeFile(cfg, JSON.stringify(packState(out, device.name)), cfg.sha, `שמירה מ-${device.name}`);
+            Object.assign(cfg, { sha, etag: null, remoteHash: outHash });
+            if (!unimported) Object.assign(cfg, { importedSha: sha, remoteDevice: device.name, remoteAt: new Date().toISOString() });
+            wrote = true;
+          } catch (e) {
+            if (e.code === 'conflict') { cfg.etag = null; continue; }
+            throw e;
           }
         }
-        Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming) });
-      } else if (!remote) {
-        Object.assign(cfg, { sha: null, etag: null, remoteHash: null });
+        leftUnimported = unimported;
+        cfg.cleanHash = syncState.localHash;
+        cfg.savedAt = new Date().toISOString();
       }
-      if (demo) break; // never write the sample data
-      const localHash = sharedHash(state);
-      // A cap on pushes between the user's own edits stops two devices bouncing a change back and forth.
-      if (localHash === cfg.remoteHash || syncState.autoPushes >= 4) break;
-      try {
-        syncState.autoPushes++;
-        cfg.sha = await writeFile(cfg, JSON.stringify(packState(state, device.name)), cfg.sha, `עדכון מ-${device.name}`);
-        Object.assign(cfg, { etag: null, remoteHash: localHash });
-        break;
-      } catch (e) {
-        if (e.code === 'conflict' && attempt < 3) { cfg.etag = null; continue; }
-        throw e;
-      }
+      break;
     }
     cfg.at = new Date().toISOString();
     syncState.error = null;
+    const waiting = leftUnimported ? ` · יש שם גם עדכון מ-${isolate(cfg.remoteDevice || 'מכשיר אחר')} שעוד לא יובא לכאן` : '';
+    if (mode === 'pull' && manual) toast(imported || 'אין חדש ב-GitHub - המכשיר הזה כבר מעודכן');
+    else if (mode === 'push' && manual) toast((wrote ? 'נשמר ב-GitHub' : 'כבר שמור ב-GitHub - אין שינויים חדשים') + waiting);
+    else if (mode === 'both' && manual) toast([imported, wrote ? 'נשמר ב-GitHub' : ''].filter(Boolean).join(' · ') || 'הכול מסונכרן - אין שינויים');
+    else if (imported) toast(imported);
   } catch (e) {
     syncState.error = e;
+    if (manual) toast(e.message);
   } finally {
     if (syncCfg === cfg) saveSyncCfg();
-    syncState.busy = false;
-    renderSyncStatus();
-    if (syncState.pending && !uiBusy()) scheduleSync(1000);
+    syncState.busy = null;
+    renderSyncBits();
+    if (!uiBusy()) resumePending();
   }
 }
 
-let shownSyncError = null;
-function renderSyncStatus() {
+/** One line on where this device stands. */
+function syncSummary() {
+  if (syncState.busy) return BUSY_TEXT[syncState.busy];
+  const e = syncState.error;
+  if (e && e.code === 'offline') return 'אין חיבור לאינטרנט. העבודה שמורה במכשיר הזה.';
+  if (e) return `הפעולה האחרונה נכשלה: ${e.message}`;
+  const f = syncFlags();
+  const lines = [f.unsaved ? 'יש במכשיר הזה שינויים שלא נשמרו ב-GitHub.' : 'כל העבודה במכשיר הזה שמורה ב-GitHub.'];
+  if (f.news) lines.push(`יש עדכון מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` (${whenLabel(syncCfg.remoteAt)})` : ''} שעוד לא יובא.`);
+  return lines.join(' ');
+}
+
+function fileSummary() {
+  const f = syncFlags();
+  if (f.unsaved) return 'יש שינויים מאז השליחה האחרונה למכשיר אחר.';
+  if (device.sent) return `נשלח לאחרונה ${whenLabel(device.sent)}.`;
+  return 'כל מכשיר שומר עותק משלו. כך מעבירים עבודה ביניהם:';
+}
+
+function syncButtonHtml() {
+  if (store?.kind !== 'local') return '';
+  const f = syncFlags();
+  const failed = syncOn() && syncState.error && syncState.error.code !== 'offline';
+  const parts = [syncOn() ? 'שמירה, ייבוא וסנכרון' : 'שמירה וייבוא'];
+  if (f.unsaved) parts.push('יש שינויים שלא נשמרו');
+  if (f.news) parts.push('יש עדכון לייבוא');
+  if (failed) parts.push('הפעולה האחרונה נכשלה');
+  const label = parts.join(' · ');
+  return `<button class="icon-btn${syncState.busy ? ' busy' : ''}" data-act="sync-menu" aria-label="${esc(label)}" title="${esc(label)}">${icon('arrow.triangle.2.circlepath')}${f.unsaved || f.news || failed ? '<span class="badge-dot" aria-hidden="true"></span>' : ''}</button>`;
+}
+
+function syncMenu(anchor) {
+  const items = syncOn()
+    ? [
+      { header: syncSummary() },
+      { label: 'שמירה ל-GitHub', sub: 'שולח את העבודה מהמכשיר הזה', icon: 'square.and.arrow.up', disabled: demo, run: () => runSync('push', { manual: true }) },
+      { label: 'ייבוא מ-GitHub', sub: 'מביא את מה שנשמר במכשירים אחרים', icon: 'square.and.arrow.down', run: () => runSync('pull', { manual: true }) },
+      { label: 'סנכרון', sub: 'ייבוא ושמירה בלחיצה אחת', icon: 'arrow.triangle.2.circlepath', run: () => runSync('both', { manual: true }) },
+      '-',
+      { label: 'הגדרות סנכרון', icon: 'slider', run: () => go('files') },
+    ]
+    : [
+      { header: fileSummary() },
+      { label: 'שליחה למכשיר אחר', sub: 'קובץ עם כל העבודה', icon: 'square.and.arrow.up', disabled: demo, run: sendToDevice },
+      { label: 'קבלה ממכשיר אחר', sub: 'ממזג קובץ שנשלח ממכשיר אחר', icon: 'square.and.arrow.down', run: pickReceiveFile },
+      '-',
+      { label: 'סנכרון דרך GitHub', icon: 'arrow.triangle.2.circlepath', run: syncSetup },
+    ];
+  openMenu(anchor, items);
+}
+
+/** Refresh every place that shows the sync state, without redrawing the page under the user. */
+let shownSyncKey = '';
+function renderSyncBits() {
+  const nav = $('#nav-leading');
+  if (nav) nav.innerHTML = syncButtonHtml();
   const el = $('#sync-status');
   if (el) el.innerHTML = syncStatusHtml();
-  // A new kind of failure shows on the board too; being offline does not.
-  const code = syncState.error && syncState.error.code !== 'offline' ? syncState.error.message : null;
-  if (code !== shownSyncError) {
-    shownSyncError = code;
-    if (view === 'board' && !uiBusy()) render();
+  // The board's notices (a failure, an update to import) change only when the page is free.
+  const e = syncState.error;
+  const key = `${syncOn() && e && e.code !== 'offline' ? e.message : ''}|${syncFlags().news ? syncCfg.sha : ''}`;
+  if (key !== shownSyncKey && !uiBusy()) {
+    shownSyncKey = key;
+    if (view === 'board') renderBoard();
   }
 }
 
 function syncStatusHtml() {
   if (!syncCfg) return '';
   const e = syncState.error;
-  let sub;
-  let cls = 'sync';
-  if (syncState.busy) sub = 'מסנכרן…';
-  else if (e && e.code === 'offline') sub = 'אין חיבור לאינטרנט. השינויים נשמרים כאן ויישלחו כשהחיבור יחזור.';
-  else if (e) { sub = `הסנכרון נכשל: ${e.message}`; cls = 'bad'; }
-  else sub = syncCfg.at ? `מסונכרן · ${whenLabel(syncCfg.at)}` : 'עוד לא סונכרן';
-  return `<span class="row-icon ${cls}">${icon(cls === 'bad' ? 'exclamation.triangle.fill' : 'arrow.triangle.2.circlepath')}</span>
-    <span class="row-main"><span class="row-title"><bdi>${esc(`${syncCfg.owner}/${syncCfg.repo}`)}</bdi></span><span class="row-sub">${esc(sub)}</span></span>`;
+  const bad = e && e.code !== 'offline';
+  return `<span class="row-icon ${bad ? 'bad' : 'sync'}">${icon(bad ? 'exclamation.triangle.fill' : 'arrow.triangle.2.circlepath')}</span>
+    <span class="row-main"><span class="row-title"><bdi>${esc(`${syncCfg.owner}/${syncCfg.repo}`)}</bdi></span><span class="row-sub">${esc(syncSummary())}</span></span>`;
 }
 
 function syncNotice() {
+  if (!syncOn()) return '';
   const e = syncState.error;
-  if (!syncOn() || !e || e.code === 'offline') return '';
-  return `
+  if (e && e.code !== 'offline') {
+    return `
     <div class="list"><div class="notice">
       <span class="row-icon bad">${icon('exclamation.triangle.fill')}</span>
-      <div class="row-main"><span class="row-title"><b>הסנכרון לא עובד</b></span>
-        <span class="row-sub">${esc(e.message)}. השינויים נשמרים במכשיר הזה.</span></div>
+      <div class="row-main"><span class="row-title"><b>הסנכרון עם GitHub לא עובד</b></span>
+        <span class="row-sub">${esc(e.message)}. העבודה שמורה במכשיר הזה.</span></div>
       <button class="btn btn-tinted btn-small" data-go="files">פרטים</button>
+    </div></div>`;
+  }
+  if (syncAuto() || !syncFlags().news) return '';
+  return `
+    <div class="list"><div class="notice">
+      <span class="row-icon">${icon('square.and.arrow.down')}</span>
+      <div class="row-main"><span class="row-title"><b>יש עדכון ב-GitHub</b></span>
+        <span class="row-sub">${esc(`מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` · ${whenLabel(syncCfg.remoteAt)}` : ''}. עוד לא יובא למכשיר הזה.`)}</span></div>
+      <button class="btn btn-tinted btn-small" data-act="sync-pull">ייבוא</button>
     </div></div>`;
 }
 
-/** Check the repository, keep the settings on this device, and sync right away. */
+/** On GitHub Pages: the repository the site itself is served from. */
+function siteRepo() {
+  const m = location.hostname.match(/^([\w-]+)\.github\.io$/i);
+  if (!m) return null;
+  const first = location.pathname.split('/').filter(Boolean)[0];
+  return { owner: m[1], repo: first && !/\.html?$/i.test(first) ? first : `${m[1]}.github.io` };
+}
+const sameRepo = (a, b) => !!(a && b) && a.owner.toLowerCase() === b.owner.toLowerCase() && a.repo.toLowerCase() === b.repo.toLowerCase();
+
+/** Check the repository, keep the settings on this device, then import and save once. */
 async function connectSync(cfg) {
   const say = (text, bad = false) => { const el = $('#gh-result'); if (el) { el.textContent = text; el.classList.toggle('bad', bad); } };
+  if (sameRepo(cfg, siteRepo())) {
+    say('זה הריפו של האתר עצמו, והוא נשאר ציבורי בשביל GitHub Pages. לנתונים צריך ריפו נוסף ונפרד, פרטי.', true);
+    return;
+  }
   say('בודק את החיבור ל-GitHub…');
   try {
     await checkRepo(cfg);
@@ -1417,36 +1593,37 @@ async function connectSync(cfg) {
     say(e.message, true);
     return;
   }
-  syncCfg = { owner: cfg.owner, repo: cfg.repo, path: cfg.path || DEFAULT_PATH, token: cfg.token };
+  syncCfg = { owner: cfg.owner, repo: cfg.repo, path: cfg.path || DEFAULT_PATH, token: cfg.token, auto: false };
   saveSyncCfg();
   syncState.error = null;
-  syncState.autoPushes = 0;
   closeDialog();
-  toast('הסנכרון מחובר. מעכשיו כל שינוי עובר לבד בין המכשירים המחוברים.');
   render();
-  await syncNow();
+  await runSync('both', { manual: true });
 }
 
 function syncSetup() {
+  const site = siteRepo();
+  const example = `${site ? site.owner : 'שם-משתמש'}/shibutz-data`;
+  const newRepo = `https://github.com/new?name=shibutz-data&visibility=private&description=${encodeURIComponent('נתוני שיבוץ המדריכים')}`;
   openSheet({
     title: 'סנכרון דרך GitHub',
-    sub: 'הגדרה של פעם אחת בכל מכשיר. אחר כך כל שינוי עובר לבד בין המכשירים.',
+    sub: 'האתר נשאר בריפו הציבורי שלו, ו-GitHub Pages ממשיך לעבוד. הנתונים נשמרים בריפו שני, נפרד ופרטי.',
     done: 'חיבור',
     body: `
       <section class="list-section">
         <h3 class="list-header">פעם אחת, באתר GitHub</h3>
         <div class="list">
-          <a class="row action" href="https://github.com/new" target="_blank" rel="noopener">${icon('plus.circle.fill')}<span class="row-main"><span class="row-title">יצירת ריפו פרטי</span><span class="row-sub">שם לדוגמה: shibutz-data · לסמן Private</span></span>${icon('arrow.up.forward', 'chevron')}</a>
-          <a class="row action" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">${icon('key')}<span class="row-main"><span class="row-title">יצירת טוקן</span><span class="row-sub">Repository access: Only select repositories ← הריפו החדש. Permissions ← Contents: Read and write.</span></span>${icon('arrow.up.forward', 'chevron')}</a>
+          <a class="row action" href="${newRepo}" target="_blank" rel="noopener">${icon('plus.circle.fill')}<span class="row-main"><span class="row-title">1. ריפו נוסף, רק לנתונים</span><span class="row-sub">לא הריפו של האתר. שם לדוגמה: shibutz-data · לבחור Private (בחשבון החינמי ריפו פרטי הוא בחינם)</span></span>${icon('arrow.up.forward', 'chevron')}</a>
+          <a class="row action" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">${icon('key')}<span class="row-main"><span class="row-title">2. טוקן לריפו הזה</span><span class="row-sub">Repository access: Only select repositories ← ריפו הנתונים. Permissions ← Contents: Read and write.</span></span>${icon('arrow.up.forward', 'chevron')}</a>
         </div>
       </section>
       <section class="list-section">
-        <h3 class="list-header">במכשיר הזה</h3>
+        <h3 class="list-header">3. במכשיר הזה</h3>
         <div class="list">
-          <div class="row"><input class="field-inline" id="gh-repo" placeholder="שם-משתמש/שם-הריפו, או קישור חיבור" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="הריפו"></div>
+          <div class="row"><input class="field-inline" id="gh-repo" placeholder="ריפו הנתונים, למשל ${esc(example)}" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="ריפו הנתונים"></div>
           <div class="row"><input class="field-inline" id="gh-token" type="password" placeholder="הטוקן (github_pat_…)" autocomplete="off" spellcheck="false" aria-label="הטוקן"></div>
         </div>
-        <p class="list-footer" id="gh-result">הנתונים נשמרים כקובץ ${DEFAULT_PATH} בריפו, ו-GitHub שומר כל גרסה שלו. בקובץ יש את פרטי המדריכים, ולכן רק ריפו פרטי. הטוקן נשמר רק במכשיר הזה.</p>
+        <p class="list-footer" id="gh-result">בריפו נשמר קובץ אחד, ${DEFAULT_PATH}, ו-GitHub שומר כל גרסה שלו. בקובץ יש את פרטי המדריכים, ולכן הריפו חייב להיות פרטי. הטוקן נשמר רק במכשיר הזה. אפשר גם להדביק כאן קישור חיבור ממכשיר אחר.</p>
       </section>`,
   }, {
     save() {
@@ -1457,7 +1634,7 @@ function syncSetup() {
       const token = $('#gh-token').value.trim();
       if (!repo || !token) {
         const el = $('#gh-result');
-        el.textContent = 'צריך את שם הריפו (שם-משתמש/שם-הריפו) ואת הטוקן.';
+        el.textContent = 'צריך את שם ריפו הנתונים (שם-משתמש/שם-הריפו) ואת הטוקן.';
         el.classList.add('bad');
         return;
       }
@@ -1470,9 +1647,9 @@ function syncSetup() {
 function confirmConnect(cfg) {
   openSheet({
     title: 'חיבור לסנכרון',
-    sub: `המכשיר הזה יסתנכרן עם ${esc(`${cfg.owner}/${cfg.repo}`)} ב-GitHub.`,
+    sub: `המכשיר הזה יתחבר לריפו ${esc(`${cfg.owner}/${cfg.repo}`)} ב-GitHub.`,
     done: 'חיבור',
-    body: `<p class="list-footer" id="gh-result" style="padding-block-start:0">מה שכבר יש במכשיר הזה יתמזג עם הנתונים שם, ושום שיבוץ לא יימחק.</p>`,
+    body: `<p class="list-footer" id="gh-result" style="padding-block-start:0">מה שנשמר שם ייובא לכאן, ומה שכבר יש במכשיר הזה יתמזג איתו. שום שיבוץ לא יימחק.</p>`,
   }, { save() { connectSync(cfg); } });
 }
 
@@ -1527,6 +1704,7 @@ function renderChrome() {
     files: '',
   };
   $('#nav-actions').innerHTML = actions[view];
+  $('#nav-leading').innerHTML = syncButtonHtml();
 }
 
 function render() {
@@ -1575,7 +1753,7 @@ document.addEventListener('click', async e => {
     const handlers = menuHandlers;
     closeMenu();
     if (item) { handlers[+item.dataset.menu].run(); return; }
-    if (t.closest('[data-act="ev-menu"]')) return;
+    if (t.closest('[data-act="ev-menu"], [data-act="sync-menu"]')) return; // the same button closes its menu
   }
   const alertBtn = t.closest('[data-alert]');
   if (alertBtn) { const a = alertActions[+alertBtn.dataset.alert]; $('#alert').close(); a.run?.(); return; }
@@ -1682,7 +1860,10 @@ document.addEventListener('click', async e => {
     }
     case 'send': sendToDevice(); break;
     case 'sync-setup': syncSetup(); break;
-    case 'sync-now': syncState.autoPushes = 0; syncNow(); break;
+    case 'sync-menu': syncMenu(actEl); break;
+    case 'sync-push': runSync('push', { manual: true }); break;
+    case 'sync-pull': runSync('pull', { manual: true }); break;
+    case 'sync-both': runSync('both', { manual: true }); break;
     case 'sync-share': syncShare(); break;
     case 'sync-off': syncOff(); break;
     case 'reset':
@@ -1695,6 +1876,8 @@ document.addEventListener('click', async e => {
           { label: 'ביטול', cls: 'btn-gray' },
           { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: () => {
             if (syncCfg) { syncCfg = null; saveSyncCfg(); syncState.error = null; }
+            Object.assign(device, { sentHash: null, received: null });
+            saveDevice();
             state = emptyState();
             snapshot = clone(state);
             autoUndo = null;
@@ -1724,6 +1907,13 @@ document.addEventListener('change', e => {
   if (t.id === 'file-roster' && t.files[0]) importRoster(t.files[0]);
   if ((t.id === 'file-schedule' || t.id === 'file-schedule-quick') && t.files[0]) importSchedule(t.files[0]);
   if (t.id === 'file-receive' && t.files[0]) receiveFile(t.files[0]);
+  if (t.id === 'sync-auto' && syncCfg) {
+    syncCfg.auto = t.checked;
+    saveSyncCfg();
+    toast(t.checked ? 'סנכרון אוטומטי פועל: כל שינוי נשמר ב-GitHub תוך שניות, ועדכונים מיובאים לבד.' : 'סנכרון אוטומטי כבוי: שומרים ומייבאים בלחיצה.');
+    if (t.checked) scheduleSync('both', 300);
+    return;
+  }
   // The schedule file often keeps its name; clearing lets the same file be picked again.
   if (t.type === 'file') setTimeout(() => { t.value = ''; }, 0);
 });
@@ -1791,13 +1981,13 @@ document.addEventListener('drop', e => {
   else importSchedule(file);
 });
 
-$('#dialog').addEventListener('close', () => { dialogHandlers = {}; if (syncState.pending) scheduleSync(800); });
-$('#alert').addEventListener('close', () => { if (syncState.pending) scheduleSync(800); });
-document.addEventListener('focusout', () => { if (syncState.pending) scheduleSync(1500); });
-window.addEventListener('online', () => scheduleSync(500));
+$('#dialog').addEventListener('close', () => { dialogHandlers = {}; resumePending(); });
+$('#alert').addEventListener('close', () => resumePending());
+document.addEventListener('focusout', () => resumePending(1500));
+window.addEventListener('online', () => scheduleSync(syncAuto() ? 'both' : 'check', 500));
 document.addEventListener('toggle', e => { if (e.target.id === 'filters-box') filtersOpen = e.target.open; }, true);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { flush(); if (syncOn() && sharedHash(state) !== syncCfg.remoteHash) syncNow(); } else scheduleSync(300);
+  if (document.visibilityState === 'hidden') { flush(); if (syncAuto() && syncFlags().unsaved) runSync('both'); } else scheduleSync(syncAuto() ? 'both' : 'check', 300);
 });
 window.addEventListener('resize', closeMenu);
 // The bar firms into a band once content scrolls beneath it.
@@ -1824,6 +2014,7 @@ async function start() {
     demo = true;
   }
   snapshot = clone(state);
+  syncState.localHash = demo ? null : sharedHash(state);
   personIndex = null;
   render();
   if (hasData(state) && !demo) askToPersist();
@@ -1832,8 +2023,9 @@ async function start() {
   if (link) {
     history.replaceState(null, '', location.pathname + location.search);
     if (store.kind === 'local') confirmConnect(link);
-  } else if (syncOn()) syncNow();
-  setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 90000);
+  } else if (syncOn()) runSync(syncAuto() ? 'both' : 'check');
+  // Without automatic sync this only looks whether another device saved something, to show it.
+  setInterval(() => { if (document.visibilityState === 'visible') runSync(syncAuto() ? 'both' : 'check'); }, 90000);
 }
 
 start();

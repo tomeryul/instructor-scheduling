@@ -425,6 +425,15 @@ details.disclosure[open] > summary .chevron { transform: rotate(90deg); }
 .menu button.destructive, .menu button.destructive .sym { color: var(--red); }
 .menu button:hover, .menu button:focus-visible { background: var(--fill-4); outline: none; }
 .menu hr { border: 0; block-size: 6px; margin: 4px 0; background: var(--fill-4); }
+.menu { max-inline-size: min(340px, calc(100vw - 32px)); }
+.menu-header { margin: 0; padding: 8px 16px 10px; font-size: 0.765rem; line-height: 1.385; color: var(--label-2); border-block-end: 0.5px solid var(--separator); }
+.menu-label { display: grid; gap: 2px; }
+.menu-label small { font-size: 0.765rem; line-height: 1.3; color: var(--label-2); }
+.menu button:disabled { opacity: 0.35; cursor: default; }
+/* A dot on a bar button: something waits (unsaved work, an update to import). The label says what. */
+.badge-dot { position: absolute; inset-block-start: 9px; inset-inline-end: 8px; inline-size: 9px; block-size: 9px; border-radius: 50%; background: var(--orange); box-shadow: 0 0 0 2px var(--bg-grouped); }
+.icon-btn.busy .sym { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(-360deg); } }
 
 /* ---------------------------------------------------------------- sheets and alerts */
 dialog.sheet {

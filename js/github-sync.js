@@ -52,7 +52,7 @@ export async function checkRepo(cfg) {
   if (res.status === 404) throw new SyncError('הריפו לא נמצא, או שלטוקן אין גישה אליו', 'missing');
   if (!res.ok) throw new SyncError(`GitHub החזיר שגיאה ${res.status}`, 'http');
   const repo = await res.json();
-  if (!repo.private) throw new SyncError('הריפו ציבורי - כל אחד יוכל לראות את פרטי המדריכים. צריך ריפו פרטי.', 'public');
+  if (!repo.private) throw new SyncError('הריפו הזה ציבורי, וכל אחד היה רואה בו את פרטי המדריכים. לנתונים צריך ריפו נוסף ונפרד, פרטי (הריפו של האתר נשאר ציבורי בשביל GitHub Pages).', 'public');
   return repo;
 }
 
