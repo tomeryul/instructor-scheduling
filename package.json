@@ -1,0 +1,12 @@
+{
+  "name": "instructor-scheduling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "שיבוץ מדריכים לנוער שוחר מדע - אתר סטטי לשיבוץ מדריכים לימי עיון, קורסים, הרצאות ומופעי קסמים",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "start": "python3 -m http.server 8000",
+    "build:artifact": "node scripts/build-artifact.mjs"
+  }
+}
