@@ -12,6 +12,7 @@ import {
 import { buildDocument, toHtml, toPlainText, toDocxBlob, dayLabel, shortDate, monthLabel } from './export.js';
 import { openStore, saveFile, loadScript } from './storage.js';
 import { demoState } from './demo.js';
+import { icon } from './icons.js';
 
 const XLSX_URL = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
 const DOCX_URL = 'https://cdn.jsdelivr.net/npm/docx@9.0.2/build/index.umd.js';
@@ -28,10 +29,14 @@ const DEFAULT_SETTINGS = {
 };
 const DEFAULT_EXPORT = { month: 'all', location: false, sections: { assigned: true, open: true, pool: true, courses: true, done: false } };
 const ROLE_LABELS = { lab: 'מדריך/ה', magic: 'קוסם/ת', lecture: 'מרצה' };
+const VIEW_TITLES = { board: 'שיבוץ', people: 'מדריכים', export: 'ייצוא', files: 'קבצים' };
+const SLOT_ICONS = { lab: 'flask.fill', lecture: 'mic.fill', magic: 'sparkles' };
+const SLOT_ROLE = { lab: 'מדריך/ה', lecture: 'מרצה', magic: 'קוסם/ת' };
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const clone = o => JSON.parse(JSON.stringify(o));
+const chevron = () => icon('chevron.forward', 'chevron');
 
 let store = null;
 let state = emptyState();
@@ -102,6 +107,8 @@ function editPerson(id, patch) {
   state.instructorEdits[id] = { ...(state.instructorEdits[id] || {}), ...patch };
 }
 
+const initials = name => name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('');
+
 // ---------------------------------------------------------------- saving
 
 let saveTimer = null;
@@ -136,7 +143,6 @@ function leaveDemo() {
   demo = false;
   state = emptyState();
   autoUndo = null;
-  $('#demo-banner').hidden = true;
 }
 
 // ---------------------------------------------------------------- feedback
@@ -147,7 +153,7 @@ function toast(msg) {
   el.textContent = msg;
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 3400);
 }
 
 async function copyText(text, html) {
@@ -162,24 +168,40 @@ async function copyText(text, html) {
     }
     toast('הועתק');
   } catch {
-    openDialog(`
-      <div class="sheet-head"><h2 id="dialog-title">העתקה</h2><p class="muted small">ההעתקה האוטומטית לא זמינה כאן. הטקסט מסומן - העתיקו אותו (Ctrl+C).</p></div>
-      <div class="sheet-body"><textarea class="input" id="copy-area" rows="14" readonly>${esc(text)}</textarea></div>
-      <div class="sheet-foot"><button class="btn" data-close>סגירה</button></div>`);
+    openSheet({
+      title: 'העתקה',
+      sub: 'ההעתקה האוטומטית לא זמינה כאן. הטקסט מסומן - העתיקו אותו.',
+      body: `<div class="list"><div class="row"><textarea class="field-inline" id="copy-area" rows="14" readonly>${esc(text)}</textarea></div></div>`,
+    });
     const ta = $('#copy-area');
     ta.focus();
     ta.select();
   }
 }
 
-// ---------------------------------------------------------------- dialog
+// ---------------------------------------------------------------- sheets, alerts, menus
 
 const dialog = () => $('#dialog');
 let dialogHandlers = {};
 
-function openDialog(html, handlers = {}) {
+/**
+ * A sheet: grabber, Cancel (✕) on the leading edge, the task's title, Done (✓) on
+ * the trailing edge when the sheet collects input, then optional search and body.
+ */
+function openSheet({ title, sub = '', done = false, search = '', body = '' }, handlers = {}) {
   const d = dialog();
-  d.innerHTML = `<div class="sheet-inner">${html}</div>`;
+  d.innerHTML = `
+    <div class="sheet-inner">
+      <div class="sheet-grabber" aria-hidden="true"></div>
+      <div class="sheet-bar">
+        <button class="icon-btn circle" data-close aria-label="ביטול" title="ביטול">${icon('xmark')}</button>
+        <h2 id="dialog-title">${esc(title)}</h2>
+        ${done ? `<button class="icon-btn circle prominent" data-act="sheet-done" aria-label="${esc(done)}" title="${esc(done)}">${icon('checkmark')}</button>` : '<span></span>'}
+      </div>
+      ${sub ? `<p class="sheet-sub">${sub}</p>` : ''}
+      ${search ? `<div class="sheet-search">${search}</div>` : ''}
+      <div class="sheet-body">${body}</div>
+    </div>`;
   dialogHandlers = handlers;
   if (!d.open) d.showModal();
   const focus = d.querySelector('[autofocus]');
@@ -190,6 +212,43 @@ function closeDialog() {
   const d = dialog();
   if (d.open) d.close();
   dialogHandlers = {};
+}
+
+let alertActions = [];
+/** An alert for rare, irreversible actions: title, message, Cancel and the action. */
+function openAlert({ title, message, actions }) {
+  const a = $('#alert');
+  alertActions = actions;
+  a.innerHTML = `
+    <h2 id="alert-title">${esc(title)}</h2>
+    ${message ? `<p>${esc(message)}</p>` : ''}
+    <div class="alert-actions">${actions.map((x, i) => `<button class="btn ${x.cls || 'btn-gray'}" data-alert="${i}">${esc(x.label)}</button>`).join('')}</div>`;
+  a.showModal();
+  a.focus();
+}
+
+let menuHandlers = null;
+let menuScrollY = 0;
+/** A pull-down menu next to the button that opened it. */
+function openMenu(anchor, items) {
+  const m = $('#menu');
+  menuHandlers = items;
+  m.innerHTML = items.map((it, i) => (it === '-' ? '<hr>' : `<button role="menuitem" data-menu="${i}" class="${it.destructive ? 'destructive' : ''}">${esc(it.label)}${icon(it.icon)}</button>`)).join('');
+  m.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  const w = m.offsetWidth, h = m.offsetHeight;
+  let top = r.bottom + 6;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+  const left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+  m.style.top = `${top}px`;
+  m.style.left = `${left}px`;
+  menuScrollY = window.scrollY;
+  m.querySelector('button')?.focus({ preventScroll: true });
+}
+
+function closeMenu() {
+  $('#menu').hidden = true;
+  menuHandlers = null;
 }
 
 // ---------------------------------------------------------------- lookups
@@ -220,26 +279,6 @@ function relevantChanges() {
   });
 }
 
-function renderChanges() {
-  const li = state.lastImport;
-  if (!li || li.dismissed) return '';
-  const items = relevantChanges();
-  const when = new Date(li.at).toLocaleString('he-IL', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
-  const head = `<div class="changes-head"><h2>מה השתנה בעדכון הלו"ז</h2><span class="small muted">${esc(li.name)} · ${esc(when)}</span>
-    <div class="changes-tools">${items.length ? `<label class="chip"><input type="checkbox" data-toggle="onlyChanged" ${state.settings.onlyChanged ? 'checked' : ''}>רק אירועים שהשתנו</label>` : ''}
-    <button class="btn btn-ghost btn-small" data-act="dismiss-changes">סגירה</button></div></div>`;
-  if (!items.length) return `<div class="panel changes">${head}<p class="small muted" style="margin:0">אין שינויים שנוגעים לשיבוצים או לאירועים שמוצגים כאן.</p></div>`;
-  const row = r => `<li class="chg-${r.level}"><button class="link" data-jump="${esc(r.evId)}">${esc(shortDate(r.date))}</button> ${esc(r.text)} <span class="muted">· ${esc(r.title.split('(')[0].trim().slice(0, 60))}</span></li>`;
-  const attention = items.filter(r => r.level === 'attention');
-  const fresh = items.filter(r => r.level === 'new');
-  const info = items.filter(r => r.level === 'info');
-  return `<div class="panel changes">${head}
-    ${attention.length ? `<h3>דורש בדיקה (${attention.length})</h3><ul>${attention.map(row).join('')}</ul>` : ''}
-    ${fresh.length ? `<h3>אירועים חדשים לשיבוץ (${fresh.length})</h3><ul>${fresh.map(r => row({ ...r, text: '' })).join('')}</ul>` : ''}
-    ${info.length ? `<details><summary>עדכונים שהלו"ז כבר מילא (${info.length})</summary><ul>${info.map(row).join('')}</ul></details>` : ''}
-  </div>`;
-}
-
 function slotsShown(ev) {
   return state.settings.showHidden && (ev.ignored || !isRelevant(ev)) ? ev.slots : visibleSlots(ev, state.settings);
 }
@@ -261,16 +300,38 @@ function positionIssues(ev, slot, gi, pi, name, assignments) {
   return { level, reasons };
 }
 
+// ---------------------------------------------------------------- shared pieces
+
+const titleBlock = (title, subtitle) => `
+  <div class="title-block"><h1 class="large-title">${esc(title)}</h1>${subtitle ? `<p class="subtitle">${subtitle}</p>` : ''}</div>`;
+
+function demoNotice() {
+  if (!demo) return '';
+  return `
+    <div class="list"><div class="notice">
+      <span class="row-icon">${icon('info.circle')}</span>
+      <div class="row-main"><span class="row-title"><b>נתוני דוגמה</b></span>
+        <span class="row-sub">השמות והאירועים כאן מומצאים, כדי להראות איך זה עובד. שינויים בדוגמה לא נשמרים.</span></div>
+      <button class="btn btn-tinted btn-small" data-go="files" id="demo-import">ייבוא הקבצים שלי</button>
+    </div></div>`;
+}
+
+const toggleChip = (attrs, label, checked, extra = '') => `
+  <label class="toggle"><input type="checkbox" ${attrs} ${checked ? 'checked' : ''}>${icon('checkmark', 'check')}${extra}${esc(label)}</label>`;
+
+const popup = (id, options, value, attrs = '') => `
+  <span class="popup"><select id="${id}" ${attrs}>${options.map(([v, l]) => `<option value="${esc(v)}" ${v === value ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>${icon('chevron.updown')}</span>`;
+
 // ---------------------------------------------------------------- board view
 
 function renderBoard() {
   const el = $('#view-board');
   if (!hasData(state)) {
-    el.innerHTML = `
-      <div class="panel empty-state">
+    el.innerHTML = `${titleBlock('שיבוץ')}
+      <div class="list empty-state">${icon('calendar.fill')}
         <h2>מתחילים מהקבצים</h2>
-        <p>ייבאו את רשימת המדריכים (Excel) ואת קובץ הלו"ז (PDF). האתר יאתר את ימי העיון, הקורסים, ההרצאות ומופעי הקסמים, ותוכלו לשבץ מדריכים בלחיצה.</p>
-        <button class="btn btn-primary" data-go="files">לייבוא הקבצים</button>
+        <p>ייבאו את רשימת המדריכים (Excel) ואת קובץ הלו"ז (PDF). האתר מוצא את ימי העיון, הקורסים, ההרצאות ומופעי הקסמים, ומשבצים מדריכים בלחיצה.</p>
+        <button class="btn btn-prominent" data-go="files">לייבוא הקבצים</button>
       </div>`;
     return;
   }
@@ -280,7 +341,7 @@ function renderBoard() {
   const assignments = allAssignments(state.events);
   const shown = state.events.filter(eventShown);
 
-  // Counts for the filter chips, over the month in view.
+  // Counts for the filter toggles, over the month in view.
   const inMonth = state.events.filter(ev => isRelevant(ev) && !ev.ignored && (s.month === 'all' || ev.date.startsWith(s.month)) && (s.showPast || ev.date >= today));
   const subjectCounts = {};
   const slotKindCounts = {};
@@ -300,11 +361,10 @@ function renderBoard() {
   for (const ev of shown) { const c = openCount(ev, s); open += c.open; total += c.total; }
   const pct = total ? Math.round(((total - open) / total) * 100) : 0;
 
-  const chip = (group, key, label, count, swatch) => `
-    <label class="chip"><input type="checkbox" data-filter="${group}" value="${key}" ${s[group][key] !== false ? 'checked' : ''}>
-      ${swatch ? `<span class="swatch" style="background:${swatch}"></span>` : ''}${esc(label)}${count !== undefined ? ` <span class="count">${count}</span>` : ''}</label>`;
-  const toggle = (key, label, count) => `
-    <label class="chip"><input type="checkbox" data-toggle="${key}" ${s[key] ? 'checked' : ''}>${esc(label)}${count !== undefined ? ` <span class="count">${count}</span>` : ''}</label>`;
+  const count = n => ` <span class="count">${n}</span>`;
+  const filterToggle = (group, key, label, n, color) =>
+    toggleChip(`data-filter="${group}" value="${key}"`, label, s[group][key] !== false, (color ? `<span class="dot" style="background:${color}"></span>` : '')).replace('</label>', `${n !== undefined ? count(n) : ''}</label>`);
+  const optionToggle = (key, label, n) => toggleChip(`data-toggle="${key}"`, label, s[key]).replace('</label>', `${n !== undefined ? count(n) : ''}</label>`);
 
   const days = [];
   for (const ev of shown) {
@@ -312,64 +372,92 @@ function renderBoard() {
     if (last && last.date === ev.date) last.events.push(ev);
     else days.push({ date: ev.date, events: [ev] });
   }
+  const subjectsOn = Object.entries(SUBJECTS).filter(([k]) => s.subjects[k] !== false).map(([, v]) => v).join(', ');
+  const monthText = s.month === 'all' ? 'כל החודשים' : monthLabel(s.month, true);
 
   el.innerHTML = `
-    <div class="panel board-bar">
-      <div class="summary">
+    ${titleBlock('שיבוץ', `${esc(monthText)} · ${open ? `${open} עמדות פתוחות` : 'הכול משובץ'}`)}
+    ${demoNotice()}
+    <div class="list summary-card">
+      <div class="stats">
         <div class="stat open"><b>${open}</b><span>עמדות פתוחות</span></div>
         <div class="stat done"><b>${total - open}</b><span>משובצות</span></div>
         <div class="stat"><b>${shown.length}</b><span>אירועים</span></div>
-        <div class="progress" title="${pct}% משובץ"><span style="width:${pct}%"></span></div>
-        <div class="actions">
-          <label class="btn" title="ייבוא קובץ לו&quot;ז מעודכן - השיבוצים שלך נשמרים">עדכון לו"ז<input type="file" id="file-schedule-quick" accept=".pdf,application/pdf" hidden></label>
-          ${autoUndo ? '<button class="btn" data-act="undo-auto">ביטול השיבוץ האוטומטי</button>' : ''}
-          <button class="btn btn-primary" data-act="auto" ${open ? '' : 'disabled'}>שיבוץ אוטומטי של החסרים</button>
-          <button class="btn" data-act="add-event">אירוע ידני</button>
-        </div>
       </div>
-      <details class="filters-box" ${filtersOpen ? 'open' : ''}>
-      <summary>סינון: ${s.month === 'all' ? 'כל החודשים' : monthLabel(s.month, true)} · ${Object.entries(SUBJECTS).filter(([k]) => s.subjects[k] !== false).map(([, v]) => v).join(', ')}${s.onlyOpen ? ' · רק עם חסרים' : ''}</summary>
-      <div class="filters">
-        <div class="filter-group"><span class="label">חודש</span>
-          <select class="input" id="f-month" data-setting="month">
-            <option value="all">כל החודשים</option>
-            ${months.map(m => `<option value="${m}" ${s.month === m ? 'selected' : ''}>${monthLabel(m, true)}</option>`).join('')}
-          </select>
-        </div>
-        <div class="filter-group"><span class="label">סוג</span>
-          ${chip('kinds', 'study', 'ימי עיון', kindCounts.study || 0, 'var(--study)')}
-          ${chip('kinds', 'course', 'קורסים', kindCounts.course || 0, 'var(--course)')}
-        </div>
-        <div class="filter-group"><span class="label">משבצות</span>
-          ${chip('slotKinds', 'lab', 'הדרכות', slotKindCounts.lab || 0, 'var(--study)')}
-          ${chip('slotKinds', 'lecture', 'הרצאות', slotKindCounts.lecture || 0, 'var(--lecture)')}
-          ${chip('slotKinds', 'magic', 'מופעי קסמים', slotKindCounts.magic || 0, 'var(--magic)')}
-        </div>
-        <div class="filter-group"><span class="label">תחום</span>
-          ${Object.entries(SUBJECTS).map(([k, label]) => chip('subjects', k, label, subjectCounts[k] || 0)).join('')}
-        </div>
-        <div class="filter-group">
-          ${toggle('onlyOpen', 'רק עם חסרים')}
-          ${toggle('showPast', 'כולל אירועים שעברו', pastCount)}
-          ${toggle('showHidden', 'הצג מוסתרים ולא רלוונטיים', hiddenCount)}
-        </div>
-      </div>
-      </details>
-      <div class="legend">
-        <span><i style="background:var(--bad-soft);border:1px dashed var(--bad)"></i>חסר</span>
-        <span><i style="background:var(--ok-soft)"></i>משובץ</span>
-        <span><i style="background:var(--accent-soft)"></i>שובץ אוטומטית</span>
-        <span><i style="background:var(--warn-soft);border-color:var(--warn)"></i>יש הסתייגות</span>
-        <span><i style="background:var(--bad-soft);border-color:var(--bad)"></i>לא זמין/ה או כפילות</span>
+      <div class="progress" role="progressbar" aria-label="אחוז העמדות המשובצות" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>
+      <div class="toolbar">
+        <button class="btn btn-prominent" data-act="auto" ${open ? '' : 'disabled'}>${icon('wand')}שיבוץ אוטומטי של החסרים</button>
+        ${autoUndo ? `<button class="btn btn-gray" data-act="undo-auto">${icon('arrow.uturn')}ביטול השיבוץ האוטומטי</button>` : ''}
       </div>
     </div>
     ${renderChanges()}
+    <div class="list-section">
+      <div class="list">
+        <details class="disclosure" ${filtersOpen ? 'open' : ''} id="filters-box">
+          <summary class="row"><span class="row-icon">${icon('slider')}</span>
+            <span class="row-main"><span class="row-title">סינון</span><span class="row-sub">${esc(monthText)} · ${esc(subjectsOn || 'אין תחומים')}${s.onlyOpen ? ' · רק עם חסרים' : ''}</span></span>${chevron()}</summary>
+          <div class="filters">
+            <div class="filter-line"><span class="label">חודש</span>${popup('f-month', [['all', 'כל החודשים'], ...months.map(m => [m, monthLabel(m, true)])], s.month, 'data-setting="month"')}</div>
+            <div class="filter-line"><span class="label">סוג</span>
+              ${filterToggle('kinds', 'study', 'ימי עיון', kindCounts.study || 0, 'var(--yellow)')}
+              ${filterToggle('kinds', 'course', 'קורסים', kindCounts.course || 0, 'var(--purple)')}</div>
+            <div class="filter-line"><span class="label">משבצות</span>
+              ${filterToggle('slotKinds', 'lab', 'הדרכות', slotKindCounts.lab || 0, 'var(--icon-lab)')}
+              ${filterToggle('slotKinds', 'lecture', 'הרצאות', slotKindCounts.lecture || 0, 'var(--icon-lecture)')}
+              ${filterToggle('slotKinds', 'magic', 'מופעי קסמים', slotKindCounts.magic || 0, 'var(--icon-magic)')}</div>
+            <div class="filter-line"><span class="label">תחום</span>
+              ${Object.entries(SUBJECTS).map(([k, label]) => filterToggle('subjects', k, label, subjectCounts[k] || 0)).join('')}</div>
+            <div class="filter-line"><span class="label">הצגה</span>
+              ${optionToggle('onlyOpen', 'רק עם חסרים')}
+              ${optionToggle('showPast', 'כולל שעברו', pastCount)}
+              ${optionToggle('showHidden', 'מוסתרים ולא רלוונטיים', hiddenCount)}</div>
+          </div>
+        </details>
+      </div>
+      <div class="legend list-footer">
+        <span><span class="pos empty">${icon('plus')}חסר</span></span>
+        <span><span class="pos">משובץ</span></span>
+        <span><span class="pos src-auto">${icon('sparkles')}אוטומטי</span></span>
+        <span><span class="pos warn">${icon('exclamation.triangle.fill')}הסתייגות</span></span>
+        <span><span class="pos bad">${icon('xmark.circle.fill')}לא זמין/ה או כפילות</span></span>
+      </div>
+    </div>
     ${days.length ? days.map(d => `
-      <section class="day">
-        <div class="day-head"><h2>יום ${DAY_NAMES[weekday(d.date)]}</h2><span class="date">${shortDate(d.date)}</span>${d.date < today ? '<span class="past">עבר</span>' : ''}</div>
+      <section class="list-section day-group">
+        <h2 class="list-header day">יום ${DAY_NAMES[weekday(d.date)]} <span class="secondary">${shortDate(d.date)}${d.date < today ? ' · עבר' : ''}</span></h2>
         ${d.events.map(ev => renderEvent(ev, assignments)).join('')}
       </section>`).join('') : `
-      <div class="panel empty-state"><h2>אין אירועים להצגה</h2><p>אין אירועים שמתאימים לסינון הנוכחי. אפשר לשנות את החודש או את התחומים למעלה.</p></div>`}`;
+      <div class="list empty-state">${icon('magnifyingglass')}<h2>אין אירועים להצגה</h2><p>אין אירועים שמתאימים לסינון. אפשר לשנות את החודש או את התחומים בסינון.</p></div>`}`;
+}
+
+function renderChanges() {
+  const li = state.lastImport;
+  if (!li || li.dismissed) return '';
+  const items = relevantChanges();
+  const when = new Date(li.at).toLocaleString('he-IL', { weekday: 'long', hour: '2-digit', minute: '2-digit' });
+  const row = r => `
+    <button class="row chg-${r.level}" data-jump="${esc(r.evId)}">
+      <span class="row-icon">${icon(r.level === 'new' ? 'plus' : r.level === 'info' ? 'info.circle' : 'exclamation.triangle.fill')}</span>
+      <span class="row-main"><span class="row-title">${esc(r.level === 'new' ? r.title.split('(')[0].trim().slice(0, 70) : r.text)}</span>
+        <span class="row-sub">${esc(dayLabel(r.date))}${r.level === 'new' ? '' : ` · ${esc(r.title.split('(')[0].trim().slice(0, 50))}`}</span></span>${chevron()}
+    </button>`;
+  const attention = items.filter(r => r.level === 'attention');
+  const fresh = items.filter(r => r.level === 'new');
+  const info = items.filter(r => r.level === 'info');
+  return `
+    <section class="list-section changes">
+      <h2 class="list-header">מה השתנה בעדכון הלו"ז · ${esc(li.name)} · ${esc(when)}</h2>
+      <div class="list changes-list">
+        ${items.length ? '' : '<div class="row"><span class="row-main"><span class="row-sub">אין שינויים שנוגעים לשיבוצים או לאירועים שמוצגים כאן.</span></span></div>'}
+        ${attention.map(row).join('')}
+        ${fresh.map(row).join('')}
+        ${info.length ? `<details class="disclosure"><summary class="row"><span class="row-icon">${icon('info.circle')}</span><span class="row-main"><span class="row-title">עדכונים שהלו"ז כבר מילא</span><span class="row-sub">${info.length} שינויים בשמות</span></span>${chevron()}</summary>${info.map(row).join('')}</details>` : ''}
+      </div>
+      <div class="toolbar list-footer">
+        ${items.length ? toggleChip('data-toggle="onlyChanged"', 'רק אירועים שהשתנו', state.settings.onlyChanged) : ''}
+        <button class="btn btn-plain btn-small" data-act="dismiss-changes">הסתרת הרשימה</button>
+      </div>
+    </section>`;
 }
 
 function renderEvent(ev, assignments) {
@@ -378,42 +466,44 @@ function renderEvent(ev, assignments) {
   const slots = slotsShown(ev);
   const subjects = [...new Set(slots.map(sl => sl.subject).filter(Boolean))].map(k => SUBJECTS[k]);
   const hidden = ev.ignored || !isRelevant(ev);
+  const changes = (ev.changes || []).filter(x => x.level !== 'new');
+  const status = hidden ? '<span class="badge">מוסתר</span>'
+    : c.open ? `<span class="badge badge-open">חסרים ${c.open}</span>`
+      : c.total ? `<span class="badge badge-done">${icon('checkmark')}שובץ</span>` : '';
   return `
-  <article class="ev kind-${kind} ${hidden ? 'is-ignored' : ''}" data-ev="${esc(ev.id)}">
+  <article class="list ev ${hidden ? 'is-ignored' : ''}" data-ev="${esc(ev.id)}">
     <div class="ev-head">
-      <div>
-        <div class="ev-tags">
-          <span class="tag tag-kind">${EVENT_KINDS[kind]}</span>
-          ${subjects.map(t => `<span class="tag">${esc(t)}</span>`).join('')}
-          ${hidden ? '<span class="tag">מוסתר</span>' : c.open ? `<span class="tag tag-open">חסרים ${c.open}</span>` : c.total ? '<span class="tag tag-done">שובץ</span>' : ''}
-          ${ev.missingFromSchedule ? '<span class="tag tag-warn" title="האירוע לא נמצא בקובץ הלו&quot;ז האחרון שיובא">לא מופיע בלו"ז העדכני</span>' : (ev.changes || []).some(c => c.level === 'attention') ? '<span class="tag tag-warn">השתנה</span>' : ''}
-          ${(ev.changes || []).some(c => c.level === 'new') ? '<span class="tag tag-new">חדש</span>' : ''}
-          ${ev.manual ? '<span class="tag">ידני</span>' : ''}
+      <div class="row-main">
+        <div class="badges">
+          <span class="badge ${kind === 'study' ? 'badge-study' : kind === 'course' ? 'badge-course' : ''}">${EVENT_KINDS[kind]}</span>
+          ${subjects.map(t => `<span class="badge">${esc(t)}</span>`).join('')}
+          ${status}
+          ${ev.missingFromSchedule ? `<span class="badge badge-warn" title="האירוע לא נמצא בקובץ הלו&quot;ז האחרון שיובא">${icon('exclamation.triangle.fill')}לא בלו"ז העדכני</span>`
+            : changes.some(x => x.level === 'attention') ? `<span class="badge badge-warn">${icon('exclamation.triangle.fill')}השתנה</span>` : ''}
+          ${(ev.changes || []).some(x => x.level === 'new') ? '<span class="badge badge-new">חדש</span>' : ''}
+          ${ev.manual ? '<span class="badge">ידני</span>' : ''}
         </div>
         <h3 class="ev-title clamp" data-act="expand" title="לחצו להצגת הכותרת המלאה">${esc(ev.title || '(ללא כותרת)')}</h3>
       </div>
-      <div class="ev-actions">
-        <button class="btn btn-ghost btn-small" data-act="note">${ev.note ? 'עריכת הערה' : 'הערה'}</button>
-        ${ev.raw ? '<button class="btn btn-ghost btn-small" data-act="raw">טקסט מהלו"ז</button>' : ''}
-        <button class="btn btn-ghost btn-small" data-act="add-slot">משבצת</button>
-        ${ev.missingFromSchedule || ev.manual ? '<button class="btn btn-ghost btn-small btn-danger" data-act="delete-event">מחיקה</button>' : ''}
-        ${hidden ? `<button class="btn btn-ghost btn-small" data-act="unhide">${ev.ignored ? 'החזרה לשיבוץ' : 'סימון כרלוונטי'}</button>` : '<button class="btn btn-ghost btn-small" data-act="hide">הסתרה</button>'}
-      </div>
+      <button class="icon-btn" data-act="ev-menu" aria-label="פעולות לאירוע" title="פעולות">${icon('ellipsis')}</button>
     </div>
-    ${(ev.changes || []).some(c => c.level !== 'new') ? `<ul class="ev-changes">${ev.changes.filter(c => c.level !== 'new').map(c => `<li class="chg-${c.level}">${esc(c.text)}</li>`).join('')}</ul>` : ''}
-    ${slots.length ? `<ol class="slots">${slots.map(sl => renderSlot(ev, sl, assignments)).join('')}</ol>` : '<p class="muted small" style="margin:0 14px 12px">אין משבצות שדורשות מדריכים. אפשר להוסיף משבצת ידנית.</p>'}
-    ${ev.note ? `<p class="ev-note">${esc(ev.note)}</p>` : ''}
-    <pre class="raw" hidden>${esc(ev.raw || '')}</pre>
+    ${changes.map(x => `<div class="ev-change ${x.level}"><span class="row-icon">${icon(x.level === 'attention' ? 'exclamation.triangle.fill' : 'info.circle')}</span><span class="row-main">${esc(x.text)}</span></div>`).join('')}
+    ${ev.note ? `<div class="ev-change note"><span class="row-icon">${icon('note')}</span><span class="row-main">${esc(ev.note)}</span></div>` : ''}
+    ${slots.length ? slots.map(sl => renderSlot(ev, sl, assignments)).join('')
+      : '<div class="row"><span class="row-main"><span class="row-sub">אין משבצות שדורשות מדריכים. אפשר להוסיף משבצת מתפריט הפעולות.</span></span></div>'}
+    <pre class="ev-raw" hidden>${esc(ev.raw || '')}</pre>
   </article>`;
 }
 
 function renderSlot(ev, sl, assignments) {
   return `
-  <li class="slot slot-${sl.kind}" data-slot="${esc(sl.id)}">
-    <span class="time">${esc(sl.start)}–${esc(sl.end)}</span>
-    <div class="slot-main">
-      <div><span class="slot-kind"><span class="swatch"></span>${SLOT_KINDS[sl.kind]}</span><span class="slot-label">${esc(sl.label)}</span>
-        ${sl.location ? `<span class="loc"> · ${esc(sl.location)}</span>` : ''}</div>
+  <div class="row slot slot-${sl.kind}" data-slot="${esc(sl.id)}">
+    <span class="row-icon" title="${SLOT_KINDS[sl.kind]}">${icon(SLOT_ICONS[sl.kind])}</span>
+    <div class="row-main">
+      <div>
+        <div class="row-title">${esc(sl.label)}</div>
+        <div class="row-sub"><span class="slot-time">${esc(sl.start)}–${esc(sl.end)}</span> · ${SLOT_KINDS[sl.kind]}${sl.location ? ` · ${esc(sl.location)}` : ''}</div>
+      </div>
       <div class="groups">
         ${sl.groups.map((g, gi) => `
           <div class="group">
@@ -422,17 +512,18 @@ function renderSlot(ev, sl, assignments) {
           </div>`).join('')}
       </div>
     </div>
-    <div class="slot-tools"><button class="icon-btn" data-act="edit-slot" title="עריכת המשבצת">עריכה</button></div>
-  </li>`;
+    <button class="icon-btn" data-act="edit-slot" aria-label="פרטי המשבצת" title="פרטי המשבצת">${icon('info.circle')}</button>
+  </div>`;
 }
 
 function renderPosition(ev, sl, gi, pi, p, assignments) {
   const ref = `data-pos="${esc(sl.id)}|${gi}|${pi}"`;
-  if (!p.name) return `<button class="pos empty" ${ref} title="לחצו לבחירת ${sl.kind === 'lecture' ? 'מרצה' : 'מדריך/ה'}">＋ ${sl.kind === 'lecture' ? 'מרצה' : sl.kind === 'magic' ? 'קוסם/ת' : 'מדריך/ה'}</button>`;
+  if (!p.name) return `<button class="pos empty" ${ref} aria-label="בחירת ${SLOT_ROLE[sl.kind]}">${icon('plus')}${SLOT_ROLE[sl.kind]}</button>`;
   const issues = positionIssues(ev, sl, gi, pi, p.name, assignments);
-  const cls = issues.level === 'bad' ? 'bad' : issues.level === 'warn' ? 'warn' : issues.level === 'external' ? 'filled external' : p.source === 'auto' ? 'filled src-auto' : 'filled';
+  const cls = issues.level === 'bad' ? 'bad' : issues.level === 'warn' ? 'warn' : issues.level === 'external' ? 'external' : p.source === 'auto' ? 'src-auto' : '';
+  const sym = issues.level === 'bad' ? icon('xmark.circle.fill') : issues.level === 'warn' ? icon('exclamation.triangle.fill') : p.source === 'auto' && issues.level === 'ok' ? icon('sparkles') : '';
   const title = [p.source === 'auto' ? 'שובץ אוטומטית' : p.source === 'pdf' ? 'מופיע בלו"ז' : 'שובץ ידנית', ...issues.reasons].join(' · ');
-  return `<button class="pos ${cls}" ${ref} title="${esc(title)}">${issues.level === 'ok' || issues.level === 'external' ? '' : '<span class="dot"></span>'}${esc(p.name)}</button>`;
+  return `<button class="pos ${cls}" ${ref} title="${esc(title)}">${sym}${esc(p.name)}</button>`;
 }
 
 // ---------------------------------------------------------------- picker
@@ -449,35 +540,33 @@ function openPicker(ev, slot, gi, pi) {
     ['role', 'בלי התפקיד המתאים'],
   ];
   const row = c => `
-    <button class="cand tier-${c.tier}" data-pick="${esc(c.instructor.name)}" data-search="${esc(normalizeName(c.instructor.name))}">
-      <span class="name">${esc(c.instructor.name)}${c.instructor.name === current ? ' (משובץ/ת עכשיו)' : ''}</span>
-      <span class="meta">${c.load} החודש</span>
-      ${c.reasons.length || c.partner ? `<span class="reasons">${c.partner ? '<span class="good">עובדים יחד הרבה</span>' : ''}${c.reasons.map(r => `<span>${esc(r)}</span>`).join('')}</span>` : ''}
+    <button class="row cand tier-${c.tier}" data-pick="${esc(c.instructor.name)}" data-search="${esc(normalizeName(c.instructor.name))}">
+      <span class="row-main"><span class="row-title">${esc(c.instructor.name)}</span>
+        ${c.reasons.length || c.partner ? `<span class="row-sub">${c.partner ? '<span class="pair">עובדים יחד הרבה</span>' : ''}${c.reasons.map(r => `<span class="why">${esc(r)}</span>`).join('')}</span>` : ''}</span>
+      <span class="row-value">${c.load} החודש</span>
+      ${c.instructor.name === current ? `<span class="check-mark" aria-label="משובץ/ת עכשיו">${icon('checkmark')}</span>` : ''}
     </button>`;
   const sections = tiers.map(([tier, title], i) => {
     const list = ranked.filter(c => c.tier === tier);
     if (!list.length) return '';
-    const body = `<div class="cand-list">${list.map(row).join('')}</div>`;
-    return i < 2
-      ? `<div class="cand-section"><h3>${title} (${list.length})</h3>${body}</div>`
-      : `<details class="more cand-section"><summary>${title} (${list.length})</summary>${body}</details>`;
+    if (i < 2) return `<section class="list-section"><h3 class="list-header">${title} · ${list.length}</h3><div class="list">${list.map(row).join('')}</div></section>`;
+    return `<section class="list-section"><div class="list"><details class="disclosure more">
+      <summary class="row"><span class="row-main"><span class="row-title">${title}</span><span class="row-sub">${list.length} אנשים</span></span>${chevron()}</summary>
+      ${list.map(row).join('')}</details></div></section>`;
   }).join('');
-  const roleName = slot.kind === 'lecture' ? 'מרצה' : slot.kind === 'magic' ? 'קוסם/ת' : 'מדריך/ה';
+  const roleName = SLOT_ROLE[slot.kind];
 
-  openDialog(`
-    <div class="sheet-head">
-      <h2 id="dialog-title">בחירת ${roleName}</h2>
-      <p class="small muted">${esc(dayLabel(ev.date))} · ${esc(slot.start)}–${esc(slot.end)} · ${esc(slot.label)}${group.label ? ' · ' + esc(group.label) : ''}</p>
-      <p class="small muted">${esc(ev.title.slice(0, 120))}</p>
-      <input class="input" id="pick-search" type="search" placeholder="חיפוש שם…" autocomplete="off" autofocus>
-    </div>
-    <div class="sheet-body" id="pick-body">${sections || '<p class="muted">אין מדריכים ברשימה. ייבאו את קובץ המדריכים או כתבו שם למטה.</p>'}</div>
-    <div class="sheet-foot">
-      <input class="input grow" id="pick-free" placeholder="שם שלא ברשימה" autocomplete="off">
-      <button class="btn" data-act="pick-free">שיבוץ שם זה</button>
-      ${current ? '<button class="btn btn-danger" data-act="pick-clear">ניקוי השיבוץ</button>' : ''}
-      <button class="btn btn-ghost" data-close>ביטול</button>
-    </div>`, {
+  openSheet({
+    title: `בחירת ${roleName}`,
+    sub: `${esc(dayLabel(ev.date))} · <span class="slot-time">${esc(slot.start)}–${esc(slot.end)}</span> · ${esc(slot.label)}${group.label ? ' · ' + esc(group.label) : ''}`,
+    search: '<input class="search" id="pick-search" type="search" placeholder="חיפוש שם" autocomplete="off" autofocus aria-label="חיפוש שם">',
+    body: `<div id="pick-body" style="display:grid;gap:24px">${sections || '<div class="list empty-state"><p>אין מדריכים ברשימה. ייבאו את קובץ המדריכים, או כתבו שם למטה.</p></div>'}</div>
+      <section class="list-section">
+        <h3 class="list-header">שם שלא ברשימה</h3>
+        <div class="list"><div class="row"><input class="field-inline" id="pick-free" placeholder="שם מלא" autocomplete="off" aria-label="שם שלא ברשימה"><button class="btn btn-tinted btn-small" data-act="pick-free">שיבוץ</button></div></div>
+      </section>
+      ${current ? `<div class="list"><button class="row action destructive" data-act="pick-clear">${icon('xmark.circle.fill')}<span class="row-main">ניקוי השיבוץ (${esc(current)})</span></button></div>` : ''}`,
+  }, {
     pick(name) {
       const p = slot.groups[gi].positions[pi];
       p.name = name;
@@ -500,32 +589,12 @@ function openPicker(ev, slot, gi, pi) {
 function slotEditor(ev, slot, isNew) {
   const draft = clone(slot);
   const renderGroups = () => draft.groups.map((g, gi) => `
-    <div class="group-edit" data-gi="${gi}">
-      <label class="field">שם קבוצה<input class="input" data-g="label" value="${esc(g.label)}" placeholder="למשל קבוצה א'"></label>
-      <span class="small">עמדות: <b class="num">${g.positions.length}</b></span>
-      <button class="btn btn-small" data-gact="minus" ${g.positions.length <= 1 ? 'disabled' : ''}>−</button>
-      <button class="btn btn-small" data-gact="plus">+</button>
-      ${draft.groups.length > 1 ? '<button class="btn btn-small btn-danger" data-gact="remove">הסרת קבוצה</button>' : ''}
-    </div>`).join('');
-  const html = () => `
-    <div class="sheet-head"><h2 id="dialog-title">${isNew ? 'משבצת חדשה' : 'עריכת משבצת'}</h2><p class="small muted">${esc(dayLabel(ev.date))} · ${esc(ev.title.slice(0, 90))}</p></div>
-    <div class="sheet-body">
-      <div class="form-grid">
-        <label class="field">התחלה<input class="input" type="time" id="se-start" value="${esc(draft.start)}"></label>
-        <label class="field">סיום<input class="input" type="time" id="se-end" value="${esc(draft.end)}"></label>
-        <label class="field">סוג<select class="input" id="se-kind">${Object.entries(SLOT_KINDS).map(([k, v]) => `<option value="${k}" ${draft.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-        <label class="field">תחום<select class="input" id="se-subject">${Object.entries(SUBJECTS).map(([k, v]) => `<option value="${k}" ${(draft.subject || 'general') === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
-      </div>
-      <label class="field">תיאור הפעילות<input class="input" id="se-label" value="${esc(draft.label)}"></label>
-      <label class="field">מיקום<input class="input" id="se-location" value="${esc(draft.location || '')}"></label>
-      <div id="se-groups" style="display:grid;gap:8px">${renderGroups()}</div>
-      <div><button class="btn btn-small" data-gact="add-group">הוספת קבוצה</button></div>
-    </div>
-    <div class="sheet-foot">
-      <button class="btn btn-primary" data-act="slot-save">שמירה</button>
-      ${isNew ? '' : '<button class="btn btn-danger" data-act="slot-delete">מחיקת המשבצת</button>'}
-      <button class="btn btn-ghost" data-close>ביטול</button>
-    </div>`;
+    <div class="row" data-gi="${gi}">
+      <input class="field-inline" data-g="label" value="${esc(g.label)}" placeholder="קבוצה ${gi + 1} (שם לא חובה)" aria-label="שם הקבוצה">
+      <span class="row-value">${g.positions.length} עמדות</span>
+      <span class="stepper"><button data-gact="minus" aria-label="פחות עמדות" ${g.positions.length <= 1 ? 'disabled' : ''}>−</button><button data-gact="plus" aria-label="עוד עמדה">${icon('plus')}</button></span>
+      ${draft.groups.length > 1 ? `<button class="icon-btn" data-gact="remove" aria-label="הסרת הקבוצה" style="color:var(--red)">${icon('trash')}</button>` : ''}
+    </div>`).join('') + `<button class="row action" data-gact="add-group">${icon('plus.circle.fill')}<span class="row-main">הוספת קבוצה</span></button>`;
   const readForm = () => {
     draft.start = $('#se-start').value || draft.start;
     draft.end = $('#se-end').value || draft.end;
@@ -535,7 +604,28 @@ function slotEditor(ev, slot, isNew) {
     draft.location = $('#se-location').value.trim();
     document.querySelectorAll('#se-groups [data-gi]').forEach(row => { draft.groups[+row.dataset.gi].label = row.querySelector('[data-g="label"]').value.trim(); });
   };
-  openDialog(html(), {
+  openSheet({
+    title: isNew ? 'משבצת חדשה' : 'פרטי המשבצת',
+    sub: `${esc(dayLabel(ev.date))} · ${esc(ev.title.split('(')[0].trim().slice(0, 70))}`,
+    done: 'שמירה',
+    body: `
+      <div class="list">
+        <div class="row"><span class="row-label">התחלה</span><span class="row-main"></span><input type="time" id="se-start" value="${esc(draft.start)}"></div>
+        <div class="row"><span class="row-label">סיום</span><span class="row-main"></span><input type="time" id="se-end" value="${esc(draft.end)}"></div>
+        <div class="row"><span class="row-label">סוג</span><span class="row-main"></span>${popup('se-kind', Object.entries(SLOT_KINDS), draft.kind)}</div>
+        <div class="row"><span class="row-label">תחום</span><span class="row-main"></span>${popup('se-subject', Object.entries(SUBJECTS), draft.subject || 'general')}</div>
+      </div>
+      <div class="list">
+        <div class="row"><input class="field-inline" id="se-label" value="${esc(draft.label)}" placeholder="תיאור הפעילות" aria-label="תיאור הפעילות"></div>
+        <div class="row"><input class="field-inline" id="se-location" value="${esc(draft.location || '')}" placeholder="מיקום" aria-label="מיקום"></div>
+      </div>
+      <section class="list-section">
+        <h3 class="list-header">קבוצות ועמדות</h3>
+        <div class="list" id="se-groups">${renderGroups()}</div>
+        <p class="list-footer">בהדרכה יש בדרך כלל זוג מדריכים לכל קבוצה.</p>
+      </section>
+      ${isNew ? '' : `<div class="list"><button class="row action destructive" data-act="slot-delete">${icon('trash')}<span class="row-main">מחיקת המשבצת</span></button></div>`}`,
+  }, {
     group(action, gi) {
       readForm();
       if (action === 'add-group') draft.groups.push({ label: '', activity: '', positions: [{ name: null, source: null }, { name: null, source: null }] });
@@ -569,22 +659,23 @@ function newSlot(ev) {
 }
 
 function eventEditor() {
-  openDialog(`
-    <div class="sheet-head"><h2 id="dialog-title">אירוע ידני</h2><p class="small muted">לאירוע שלא מופיע בקובץ הלו"ז. אחרי השמירה מוסיפים לו משבצות.</p></div>
-    <div class="sheet-body">
-      <div class="form-grid">
-        <label class="field">תאריך<input class="input" type="date" id="ee-date" value="${todayISO()}"></label>
-        <label class="field">סוג<select class="input" id="ee-kind"><option value="study">יום עיון</option><option value="course">קורס</option></select></label>
+  openSheet({
+    title: 'אירוע ידני',
+    sub: 'לאירוע שלא מופיע בקובץ הלו"ז. אחרי השמירה מוסיפים לו משבצת.',
+    done: 'יצירה',
+    body: `
+      <div class="list">
+        <div class="row"><span class="row-label">תאריך</span><span class="row-main"></span><input type="date" id="ee-date" value="${todayISO()}"></div>
+        <div class="row"><span class="row-label">סוג</span><span class="row-main"></span>${popup('ee-kind', [['study', 'יום עיון'], ['course', 'קורס']], 'study')}</div>
       </div>
-      <label class="field">כותרת<input class="input" id="ee-title" placeholder="למשל: יום עיון בכימיה לתיכון… (איש קשר) כיתה י״א"></label>
-    </div>
-    <div class="sheet-foot"><button class="btn btn-primary" data-act="event-save">יצירה והוספת משבצת</button><button class="btn btn-ghost" data-close>ביטול</button></div>`, {
+      <div class="list"><div class="row"><input class="field-inline" id="ee-title" placeholder="כותרת, למשל: יום עיון בכימיה לתיכון… כיתה י״א" aria-label="כותרת" autofocus></div></div>`,
+  }, {
     save() {
       const date = $('#ee-date').value;
       const title = $('#ee-title').value.trim();
       if (!date || !title) { toast('צריך תאריך וכותרת'); return; }
       leaveDemo();
-      const ev = { id: `m${Date.now().toString(36)}`, date, color: null, kind: $('#ee-kind').value, subject: null, title, raw: '', slots: [], ignored: false, note: '', manual: true };
+      const ev = { id: `m${Date.now().toString(36)}`, date, color: null, kind: $('#ee-kind').value, subject: null, title, raw: '', slots: [], ignored: false, note: '', manual: true, changes: [] };
       state.events.push(ev);
       state.events.sort((a, b) => a.date.localeCompare(b.date));
       closeDialog();
@@ -595,16 +686,38 @@ function eventEditor() {
 }
 
 function noteEditor(ev) {
-  openDialog(`
-    <div class="sheet-head"><h2 id="dialog-title">הערה לאירוע</h2><p class="small muted">${esc(dayLabel(ev.date))} · ${esc(ev.title.slice(0, 90))}. ההערה תופיע גם בקובץ המיוצא.</p></div>
-    <div class="sheet-body"><textarea class="input" id="note-text" rows="4" placeholder="למשל: תוזכרו ביום חמישי / השעות הוקדמו, כל המדריכים עודכנו" autofocus>${esc(ev.note || '')}</textarea></div>
-    <div class="sheet-foot"><button class="btn btn-primary" data-act="note-save">שמירה</button><button class="btn btn-ghost" data-close>ביטול</button></div>`, {
+  openSheet({
+    title: 'הערה',
+    sub: `${esc(dayLabel(ev.date))} · ההערה מופיעה גם בקובץ המיוצא`,
+    done: 'שמירה',
+    body: `<div class="list"><div class="row"><textarea class="field-inline" id="note-text" rows="4" placeholder="למשל: תוזכרו ביום חמישי / השעות הוקדמו, כל המדריכים עודכנו" aria-label="הערה" autofocus>${esc(ev.note || '')}</textarea></div></div>`,
+  }, {
     save() {
       ev.note = $('#note-text').value.trim();
       closeDialog();
       commit();
     },
   });
+}
+
+function eventMenu(anchor, ev) {
+  const hidden = ev.ignored || !isRelevant(ev);
+  const items = [
+    { label: ev.note ? 'עריכת הערה' : 'הוספת הערה', icon: 'note', run: () => noteEditor(ev) },
+    ...(ev.raw ? [{ label: 'הטקסט מהלו"ז', icon: 'text.doc', run: () => { const r = document.querySelector(`[data-ev="${CSS.escape(ev.id)}"] .ev-raw`); if (r) r.hidden = !r.hidden; } }] : []),
+    { label: 'הוספת משבצת', icon: 'plus', run: () => slotEditor(ev, newSlot(ev), true) },
+    '-',
+    hidden
+      ? { label: ev.ignored ? 'החזרה לשיבוץ' : 'סימון כרלוונטי', icon: 'eye', run: () => {
+        if (ev.ignored) ev.ignored = false;
+        else { ev.kind = ev.kind === 'other' ? 'study' : ev.kind; ev.kindOverride = ev.kind; }
+        commit();
+        if (!ev.slots.length) slotEditor(ev, newSlot(ev), true);
+      } }
+      : { label: 'הסתרה', icon: 'eye.slash', run: () => { ev.ignored = true; commit(); toast('האירוע הוסתר. אפשר להחזיר אותו דרך "מוסתרים" בסינון.'); } },
+    ...(ev.missingFromSchedule || ev.manual ? [{ label: 'מחיקה', icon: 'trash', destructive: true, run: () => { state.events = state.events.filter(x => x !== ev); commit(); toast('האירוע נמחק'); } }] : []),
+  ];
+  openMenu(anchor, items);
 }
 
 // ---------------------------------------------------------------- people view
@@ -623,12 +736,22 @@ function upcomingFor(person) {
     .sort((a, b) => a.ev.date.localeCompare(b.ev.date) || a.start - b.start);
 }
 
+function weekStrip(a) {
+  return `<div class="week" aria-label="זמינות בשבוע">${[0, 1, 2, 3, 4, 5].map(d => {
+    const rule = a?.days?.[d];
+    const cls = rule === 'no' ? 'no' : Array.isArray(rule) && !(rule.length === 1 && rule[0][0] === '00:00' && rule[0][1] === '24:00') ? 'part' : '';
+    return `<span class="${cls}" title="${DAY_NAMES[d]}: ${rule === 'no' ? 'לא פנוי/ה' : windowsToText(rule) || 'פנוי/ה'}">${'אבגדהו'[d]}'</span>`;
+  }).join('')}</div>`;
+}
+
 function renderPeople() {
   const el = $('#view-people');
   const list = people();
   if (!list.length) {
-    el.innerHTML = `<div class="panel empty-state"><h2>אין עדיין מדריכים</h2><p>ייבאו את קובץ המדריכים (Excel) בלשונית "קבצים", או הוסיפו מדריך/ה ידנית.</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center"><button class="btn btn-primary" data-go="files">לייבוא</button><button class="btn" data-act="add-person">הוספת מדריך/ה</button></div></div>`;
+    el.innerHTML = `${titleBlock('מדריכים')}
+      <div class="list empty-state">${icon('person.2.fill')}<h2>אין עדיין מדריכים</h2>
+        <p>ייבאו את קובץ המדריכים (Excel) בלשונית "קבצים", או הוסיפו מדריך/ה.</p>
+        <button class="btn btn-prominent" data-go="files">לייבוא</button></div>`;
     return;
   }
   const today = todayISO();
@@ -640,55 +763,79 @@ function renderPeople() {
   }
   const q = normalizeName(peopleQuery);
   const rows = list.filter(p => !q || normalizeName(p.name).includes(q));
+  const count = k => list.filter(p => p.active !== false && p.roles?.[k]).length;
   el.innerHTML = `
-    <div class="panel" style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
-      <div><h2>מדריכים</h2><p class="small muted" style="margin:0">התפקידים והזמינות נקראו מהעמודות "הדרכה" ו"הערות". אפשר לתקן כאן - התיקונים נשמרים גם כשמייבאים את הקובץ מחדש.</p></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <input class="input" type="search" id="people-search" placeholder="חיפוש…" value="${esc(peopleQuery)}">
-        <button class="btn" data-act="add-person">הוספת מדריך/ה</button>
+    ${titleBlock('מדריכים', `${list.length} ברשימה · ${count('lab')} מדריכים · ${count('magic')} קוסמים · ${count('lecture')} מרצים`)}
+    ${demoNotice()}
+    <input class="search" type="search" id="people-search" placeholder="חיפוש מדריך/ה" value="${esc(peopleQuery)}" aria-label="חיפוש מדריך/ה">
+    <section class="list-section">
+      <div class="list" id="people-list">
+        ${rows.map(p => {
+          const roles = Object.entries(ROLE_LABELS).filter(([k]) => p.roles?.[k]).map(([, v]) => v).join(' · ') || 'בלי תפקיד';
+          const warn = [p.active === false ? 'לא פעיל/ה' : '', p.roles?.lab && !p.safetyOk ? 'בטיחות' : '', ...(p.tags || []).filter(t => /לא הגיע|מילואים/.test(t))].filter(Boolean);
+          const avail = describeAvailability(p.availability);
+          return `
+          <button class="row" data-act="open-person" data-person="${esc(p.id)}">
+            <span class="avatar ${p.active === false ? 'inactive' : ''}" aria-hidden="true">${esc(initials(p.name))}</span>
+            <span class="row-main">
+              <span class="row-title">${esc(p.name)}</span>
+              <span class="row-sub">${esc(roles)}${avail ? ` · ${esc(avail)}` : ''}</span>
+              ${warn.length ? `<span class="badges">${warn.map(w => `<span class="badge badge-warn">${icon('exclamation.triangle.fill')}${esc(w)}</span>`).join('')}</span>` : ''}
+            </span>
+            <span class="row-value" title="שיבוצים קרובים">${upcoming.get(p.id) || 0}</span>${chevron()}
+          </button>`;
+        }).join('') || '<div class="row"><span class="row-sub">לא נמצאו מדריכים בשם הזה.</span></div>'}
       </div>
-    </div>
-    <div class="table-scroll">
-      <table class="people">
-        <thead><tr><th>שם</th><th>טלפון</th><th>תפקידים</th><th>זמינות</th><th>בטיחות</th><th>שיבוצים קרובים</th><th>הערות מהקובץ</th><th></th></tr></thead>
-        <tbody>${rows.map(p => `
-          <tr class="${p.active === false ? 'inactive' : ''}" data-person="${esc(p.id)}">
-            <td><b>${esc(p.name)}</b>${p.tags?.length ? `<div class="small muted">${p.tags.map(esc).join(' · ')}</div>` : ''}${p.degree ? `<div class="small muted">${esc(p.degree)}</div>` : ''}</td>
-            <td class="phone">${esc(p.phone || '')}</td>
-            <td><div class="role-toggles">${Object.entries(ROLE_LABELS).map(([k, v]) => `<label class="chip"><input type="checkbox" data-role="${k}" ${p.roles?.[k] ? 'checked' : ''}>${v}</label>`).join('')}
-              <label class="chip"><input type="checkbox" data-active ${p.active !== false ? 'checked' : ''}>פעיל/ה</label></div></td>
-            <td class="small">${esc(describeAvailability(p.availability)) || '<span class="muted">אין אילוצים</span>'}<div><button class="btn btn-ghost btn-small" data-act="edit-avail">עריכה</button></div></td>
-            <td class="small">${p.safetyOk ? '<span class="ok">הושלמה</span>' : `<span class="warn">לא הושלמה</span>${p.safetyNote ? `<div class="muted">${esc(p.safetyNote.slice(0, 80))}</div>` : ''}`}
-              <div><label class="chip" style="margin-top:4px"><input type="checkbox" data-safety ${p.safetyOk ? 'checked' : ''}>אושר</label></div></td>
-            <td class="num">${upcoming.get(p.id) || 0}</td>
-            <td class="notes-cell">${esc(p.notes || '')}</td>
-            <td><button class="btn btn-small" data-act="remind">תזכורת</button></td>
-          </tr>`).join('')}</tbody>
-      </table>
-    </div>`;
+      <p class="list-footer">התפקידים והזמינות נקראו מהעמודות "הדרכה" ו"הערות". המספר בצד הוא שיבוצים קרובים. תיקונים כאן נשמרים גם כשמייבאים את הקובץ מחדש.</p>
+    </section>`;
 }
 
-function availabilityEditor(person) {
+/** Everything about one instructor: roles, status, weekly availability, reminder. */
+function personSheet(person) {
   const a = person.availability || { days: {}, preferredDays: [] };
-  openDialog(`
-    <div class="sheet-head"><h2 id="dialog-title">זמינות - ${esc(person.name)}</h2>
-      <p class="small muted">לכל יום: ריק = פנוי/ה כל היום · "לא" = לא פנוי/ה · שעות כמו "מ-12:00", "עד 14:00", "10:00-13:45" (אפשר כמה, מופרדים בפסיק).</p>
-      ${person.notes ? `<p class="small" style="white-space:pre-wrap;background:var(--surface-2);padding:6px 8px;border-radius:6px;margin:0">${esc(person.notes)}</p>` : ''}</div>
-    <div class="sheet-body">
-      <div class="avail-grid">
-        ${[0, 1, 2, 3, 4, 5].map(d => `
-          <b>${DAY_NAMES[d]}</b>
-          <input class="input" data-day="${d}" value="${esc(windowsToText(a.days?.[d]))}" placeholder="פנוי/ה">
-          <label class="chip"><input type="checkbox" data-pref="${d}" ${a.preferredDays?.includes(d) ? 'checked' : ''}>מועדף</label>`).join('')}
+  const edited = !!state.instructorEdits[person.id]?.availability;
+  openSheet({
+    title: person.name,
+    done: 'שמירה',
+    body: `
+      <div class="person-head">
+        <span class="avatar big ${person.active === false ? 'inactive' : ''}" aria-hidden="true">${esc(initials(person.name))}</span>
+        <h3>${esc(person.name)}</h3>
+        ${person.phone ? `<span class="secondary num" style="direction:ltr;unicode-bidi:isolate;user-select:all">${esc(person.phone)}</span>` : ''}
+        ${person.degree || person.tags?.length ? `<div class="person-tags">${person.degree ? `<span class="badge">${esc(person.degree)}</span>` : ''}${(person.tags || []).map(t => `<span class="badge">${esc(t)}</span>`).join('')}</div>` : ''}
+        ${weekStrip(a)}
       </div>
-      <div class="form-grid">
-        <label class="field">לא זמין/ה עד תאריך<input class="input" type="date" id="av-until" value="${esc(a.unavailableUntil || '')}"></label>
-        <label class="field">שעות מועדפות<input class="input" id="av-hours" value="${a.preferredHours ? esc(a.preferredHours.join('-')) : ''}" placeholder="למשל 9:00-14:00"></label>
-      </div>
-    </div>
-    <div class="sheet-foot"><button class="btn btn-primary" data-act="avail-save">שמירה</button>
-      ${state.instructorEdits[person.id]?.availability ? '<button class="btn" data-act="avail-reset">חזרה למה שנקרא מהקובץ</button>' : ''}
-      <button class="btn btn-ghost" data-close>ביטול</button></div>`, {
+      <section class="list-section">
+        <h3 class="list-header">תפקידים</h3>
+        <div class="list">
+          ${Object.entries(ROLE_LABELS).map(([k, v]) => `<label class="row"><span class="row-main">${v}</span><input type="checkbox" role="switch" class="switch" data-prole="${k}" ${person.roles?.[k] ? 'checked' : ''}></label>`).join('')}
+        </div>
+      </section>
+      <section class="list-section">
+        <h3 class="list-header">מצב</h3>
+        <div class="list">
+          <label class="row"><span class="row-main">פעיל/ה</span><input type="checkbox" role="switch" class="switch" id="ps-active" ${person.active !== false ? 'checked' : ''}></label>
+          <label class="row"><span class="row-main"><span class="row-title">הדרכת בטיחות הושלמה</span>${person.safetyNote ? `<span class="row-sub">${esc(person.safetyNote)}</span>` : ''}</span><input type="checkbox" role="switch" class="switch" id="ps-safety" ${person.safetyOk ? 'checked' : ''}></label>
+        </div>
+      </section>
+      <section class="list-section">
+        <h3 class="list-header">זמינות בשבוע</h3>
+        <div class="list">
+          ${[0, 1, 2, 3, 4, 5].map(d => `
+            <div class="row"><span class="row-label">${DAY_NAMES[d]}</span>
+              <input class="field-inline" data-day="${d}" value="${esc(windowsToText(a.days?.[d]))}" placeholder="פנוי/ה" aria-label="זמינות ביום ${DAY_NAMES[d]}">
+              ${toggleChip(`data-pref="${d}"`, 'מועדף', a.preferredDays?.includes(d))}</div>`).join('')}
+          <div class="row"><span class="row-label">לא זמין/ה עד</span><span class="row-main"></span><input type="date" id="av-until" value="${esc(a.unavailableUntil || '')}"></div>
+          <div class="row"><span class="row-label">שעות מועדפות</span><input class="field-inline" id="av-hours" value="${a.preferredHours ? esc(a.preferredHours.join('-')) : ''}" placeholder="למשל 9:00-14:00"></div>
+        </div>
+        <p class="list-footer">ריק = פנוי/ה כל היום · "לא" = לא פנוי/ה · שעות: "מ-12:00", "עד 14:00", "10:00-13:45" (כמה, עם פסיק).</p>
+      </section>
+      ${person.notes ? `<section class="list-section"><h3 class="list-header">הערות מהקובץ</h3><div class="list"><div class="row"><span class="row-main" style="white-space:pre-wrap">${esc(person.notes)}</span></div></div></section>` : ''}
+      <div class="list">
+        <button class="row action" data-act="remind" data-person="${esc(person.id)}">${icon('bell')}<span class="row-main">העתקת הודעת תזכורת</span></button>
+        ${edited ? `<button class="row action" data-act="avail-reset">${icon('arrow.uturn')}<span class="row-main">החזרת הזמינות למה שנקרא מהקובץ</span></button>` : ''}
+      </div>`,
+  }, {
     save() {
       const days = {};
       document.querySelectorAll('#dialog [data-day]').forEach(inp => {
@@ -700,7 +847,13 @@ function availabilityEditor(person) {
       });
       const preferredDays = [...document.querySelectorAll('#dialog [data-pref]:checked')].map(i => +i.dataset.pref);
       const hours = parseWindows($('#av-hours').value.trim());
-      editPerson(person.id, { availability: { days, preferredDays, preferredHours: hours[0] || null, unavailableUntil: $('#av-until').value || null, recognized: true } });
+      const availability = { days, preferredDays, preferredHours: hours[0] || null, unavailableUntil: $('#av-until').value || null, recognized: true };
+      const roles = {};
+      document.querySelectorAll('#dialog [data-prole]').forEach(i => { roles[i.dataset.prole] = i.checked; });
+      const patch = { roles, active: $('#ps-active').checked, safetyOk: $('#ps-safety').checked };
+      // Keep the availability read from the file unless it was changed here.
+      if (JSON.stringify(availability) !== JSON.stringify({ ...person.availability, recognized: true })) patch.availability = availability;
+      editPerson(person.id, patch);
       closeDialog();
       commit();
     },
@@ -715,16 +868,19 @@ function availabilityEditor(person) {
 }
 
 function personEditor() {
-  openDialog(`
-    <div class="sheet-head"><h2 id="dialog-title">מדריך/ה חדש/ה</h2></div>
-    <div class="sheet-body">
-      <div class="form-grid">
-        <label class="field">שם<input class="input" id="pe-name" autofocus></label>
-        <label class="field">טלפון<input class="input" id="pe-phone" inputmode="tel"></label>
+  openSheet({
+    title: 'מדריך/ה חדש/ה',
+    done: 'הוספה',
+    body: `
+      <div class="list">
+        <div class="row"><input class="field-inline" id="pe-name" placeholder="שם מלא" aria-label="שם" autofocus></div>
+        <div class="row"><input class="field-inline" id="pe-phone" placeholder="טלפון" inputmode="tel" aria-label="טלפון"></div>
       </div>
-      <div class="role-toggles">${Object.entries(ROLE_LABELS).map(([k, v]) => `<label class="chip"><input type="checkbox" data-newrole="${k}" ${k === 'lab' ? 'checked' : ''}>${v}</label>`).join('')}</div>
-    </div>
-    <div class="sheet-foot"><button class="btn btn-primary" data-act="person-save">הוספה</button><button class="btn btn-ghost" data-close>ביטול</button></div>`, {
+      <section class="list-section">
+        <h3 class="list-header">תפקידים</h3>
+        <div class="list">${Object.entries(ROLE_LABELS).map(([k, v]) => `<label class="row"><span class="row-main">${v}</span><input type="checkbox" role="switch" class="switch" data-newrole="${k}" ${k === 'lab' ? 'checked' : ''}></label>`).join('')}</div>
+      </section>`,
+  }, {
     save() {
       const name = $('#pe-name').value.trim();
       if (!name) { toast('צריך שם'); return; }
@@ -766,39 +922,43 @@ function renderExport() {
   const el = $('#view-export');
   const o = state.exportOptions;
   const months = monthsInData();
-  const sec = (key, label) => `<label><input type="checkbox" data-section="${key}" ${o.sections[key] !== false ? 'checked' : ''}> ${label}</label>`;
+  const sw = (attrs, label, checked) => `<label class="row"><span class="row-main">${label}</span><input type="checkbox" role="switch" class="switch" ${attrs} ${checked ? 'checked' : ''}></label>`;
   el.innerHTML = `
+    ${titleBlock('ייצוא', 'קובץ Word במבנה של קובץ "משימות"')}
+    ${demoNotice()}
     <div class="export-layout">
-      <div class="export-options">
-        <div class="panel" style="display:grid;gap:12px">
-          <h2>הקובץ לייצוא</h2>
-          <label class="field">חודש
-            <select class="input" id="x-month">
-              <option value="all">כל החודשים</option>
-              ${months.map(m => `<option value="${m}" ${o.month === m ? 'selected' : ''}>${monthLabel(m, true)}</option>`).join('')}
-            </select></label>
-          <div class="check-list">
-            ${sec('assigned', 'שובץ')}
-            ${sec('open', 'לא שובץ')}
-            ${sec('pool', 'מדריכים שעוד לא שובצו')}
-            ${sec('courses', 'קורסים (לפי קורס)')}
-            ${sec('done', 'הדרכות שבוצעו (תאריכים שעברו)')}
-            <label><input type="checkbox" id="x-location" ${o.location ? 'checked' : ''}> כולל מיקום (מעבדה/בניין)</label>
+      <div class="export-side">
+        <section class="list-section">
+          <div class="list">
+            <div class="row"><span class="row-label">חודש</span><span class="row-main"></span>${popup('x-month', [['all', 'כל החודשים'], ...months.map(m => [m, monthLabel(m, true)])], o.month)}</div>
           </div>
-          <p class="small muted" style="margin:0">הסינון לפי תחום וסוג משבצת נלקח מלשונית השיבוץ.</p>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-primary" data-act="docx">הורדת קובץ Word</button>
-            <button class="btn" data-act="copy-doc">העתקת הטקסט</button>
+        </section>
+        <section class="list-section">
+          <h3 class="list-header">מה ייכנס לקובץ</h3>
+          <div class="list">
+            ${sw('data-section="assigned"', 'שובץ', o.sections.assigned !== false)}
+            ${sw('data-section="open"', 'לא שובץ', o.sections.open !== false)}
+            ${sw('data-section="pool"', 'מדריכים שעוד לא שובצו', o.sections.pool !== false)}
+            ${sw('data-section="courses"', 'קורסים, לפי קורס', o.sections.courses !== false)}
+            ${sw('data-section="done"', 'הדרכות שבוצעו', o.sections.done !== false)}
+            ${sw('id="x-location"', 'כולל מיקום (מעבדה ובניין)', o.location)}
           </div>
+          <p class="list-footer">התחומים וסוגי המשבצות נלקחים מהסינון בלשונית "שיבוץ".</p>
+        </section>
+        <div class="toolbar">
+          <button class="btn btn-prominent" data-act="docx">${icon('square.and.arrow.down')}הורדת קובץ Word</button>
+          <button class="btn btn-tinted" data-act="copy-doc">${icon('doc.on.doc')}העתקת הטקסט</button>
         </div>
-        <div class="panel" style="display:grid;gap:10px">
-          <label class="field">פערים לטיפול (מופיע בראש הקובץ, שורה לכל פריט)
-            <textarea class="input" id="x-gaps" rows="5" placeholder="למשל: למצוא מחליף להדר ב-29.10">${esc(state.notes.gaps)}</textarea></label>
-          <label class="field">משימות (מופיע בסוף הקובץ)
-            <textarea class="input" id="x-tasks" rows="4">${esc(state.notes.tasks)}</textarea></label>
-        </div>
+        <section class="list-section">
+          <h3 class="list-header">פערים לטיפול · בראש הקובץ, שורה לכל פריט</h3>
+          <div class="list"><div class="row"><textarea class="field-inline" id="x-gaps" rows="4" placeholder="למשל: למצוא מחליף להדר ב-29.10" aria-label="פערים לטיפול">${esc(state.notes.gaps)}</textarea></div></div>
+        </section>
+        <section class="list-section">
+          <h3 class="list-header">משימות · בסוף הקובץ</h3>
+          <div class="list"><div class="row"><textarea class="field-inline" id="x-tasks" rows="3" aria-label="משימות">${esc(state.notes.tasks)}</textarea></div></div>
+        </section>
       </div>
-      <article class="paper" id="x-preview" dir="rtl">${toHtml(exportBlocks())}</article>
+      <article class="paper" id="x-preview" dir="rtl" aria-label="תצוגה מקדימה של הקובץ">${toHtml(exportBlocks())}</article>
     </div>`;
 }
 
@@ -815,38 +975,41 @@ function renderFiles() {
   const sch = state.imports.schedule || [];
   const lastSch = sch[sch.length - 1];
   const fmt = iso => new Date(iso).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+  const result = n => (n ? `<div class="result ${n.error ? 'error' : n.busy ? 'busy' : ''}">${esc(n.text)}</div>` : '');
   el.innerHTML = `
-    <div class="files-grid">
-      <div class="panel" style="display:grid;gap:10px">
-        <h2>רשימת המדריכים</h2>
-        <p class="small muted" style="margin:0">הקובץ "נוער שוחר מדע - שיבוץ מדריכים" (Excel). נקראים: שם, טלפון, הדרכה, הדרכת בטיחות, הערות (קוסם/ת, הרצאות, אילוצי זמן).</p>
-        <label class="drop" data-drop="roster">
-          <strong>גררו לכאן קובץ Excel</strong><span class="small muted">או לחצו לבחירה (‎.xlsx, ‎.xls, ‎.csv)</span>
+    ${titleBlock('קבצים', 'מכאן נכנסים הנתונים לאתר')}
+    ${demoNotice()}
+    <section class="list-section">
+      <h3 class="list-header">רשימת המדריכים · Excel</h3>
+      <div class="list">
+        <label class="drop" data-drop="roster">${icon('tablecells')}
+          <strong>גררו לכאן את קובץ המדריכים</strong><span class="secondary" style="font-size:.882rem">או לחצו לבחירה · ‎.xlsx ‎.xls ‎.csv</span>
           <input type="file" id="file-roster" accept=".xlsx,.xls,.csv" hidden>
         </label>
-        <div class="status-line">${r ? `יובא: ${esc(r.name)} · ${r.count} מדריכים · ${fmt(r.at)}` : 'עוד לא יובא קובץ'}</div>
-        ${notices.roster ? `<div class="result ${notices.roster.error ? 'error' : ''}">${esc(notices.roster.text)}</div>` : ''}
+        ${result(notices.roster)}
       </div>
-      <div class="panel" style="display:grid;gap:10px">
-        <h2>קובץ הלו"ז</h2>
-        <p class="small muted" style="margin:0">"קובץ לוז" (שם השנה לא משנה) כ-PDF, כפי שנשמר מ-Excel: שבועות של 7 עמודות עם שורת תאריכים. אפשר לייבא שוב כשהלו"ז מתעדכן - השיבוצים שלכם נשמרים.</p>
-        <label class="drop" data-drop="schedule">
-          <strong>גררו לכאן קובץ PDF</strong><span class="small muted">או לחצו לבחירה</span>
+      <p class="list-footer">${r ? `יובא: ${esc(r.name)} · ${r.count} מדריכים · ${fmt(r.at)}` : 'נקראים: שם, טלפון, הדרכה, הדרכת בטיחות והערות (קוסם/ת, הרצאות, אילוצי זמן).'}</p>
+    </section>
+    <section class="list-section">
+      <h3 class="list-header">קובץ הלו"ז · PDF</h3>
+      <div class="list">
+        <label class="drop" data-drop="schedule">${icon('pdf')}
+          <strong>גררו לכאן את קובץ הלו"ז</strong><span class="secondary" style="font-size:.882rem">או לחצו לבחירה · כפי שנשמר מ-Excel</span>
           <input type="file" id="file-schedule" accept=".pdf,application/pdf" hidden>
         </label>
-        <div class="status-line">${lastSch ? `יובא: ${esc(lastSch.name)} · ${lastSch.events} אירועים (${shortDate(lastSch.from)}–${shortDate(lastSch.to)}) · ${fmt(lastSch.at)}` : 'עוד לא יובא קובץ'}</div>
-        ${notices.schedule ? `<div class="result ${notices.schedule.error ? 'error' : ''}">${esc(notices.schedule.text)}</div>` : ''}
+        ${result(notices.schedule)}
       </div>
-    </div>
-    <div class="panel" style="display:grid;gap:10px">
-      <h2>שמירה וגיבוי</h2>
-      <p class="small muted" style="margin:0">${store?.kind === 'db' ? 'הנתונים נשמרים בחשבון שלכם ב-claude.ai, ורק אתם רואים אותם.' : 'הנתונים נשמרים בדפדפן הזה בלבד. כדאי להוריד גיבוי מדי פעם, ולהעביר איתו את העבודה למחשב אחר.'}</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn" data-act="backup" ${demo ? 'disabled' : ''}>הורדת גיבוי</button>
-        <label class="btn">שחזור מגיבוי<input type="file" id="file-backup" accept=".json,application/json" hidden></label>
-        <button class="btn btn-danger" data-act="reset" ${demo ? 'disabled' : ''}>מחיקת כל הנתונים</button>
+      <p class="list-footer">${lastSch ? `יובא: ${esc(lastSch.name)} · ${lastSch.events} תאים (${shortDate(lastSch.from)}–${shortDate(lastSch.to)}) · ${fmt(lastSch.at)}. ` : ''}כשהלו"ז מתעדכן מייבאים אותו שוב - השיבוצים שלכם נשמרים.</p>
+    </section>
+    <section class="list-section">
+      <h3 class="list-header">שמירה וגיבוי</h3>
+      <div class="list">
+        <button class="row action" data-act="backup" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.down')}<span class="row-main">הורדת גיבוי</span></button>
+        <label class="row action">${icon('tray.and.arrow.down')}<span class="row-main">שחזור מגיבוי</span><input type="file" id="file-backup" accept=".json,application/json" hidden></label>
+        <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">מחיקת כל הנתונים</span></button>
       </div>
-    </div>`;
+      <p class="list-footer">${store?.kind === 'db' ? 'הנתונים נשמרים בחשבון שלכם ב-claude.ai, ורק אתם רואים אותם.' : 'הנתונים נשמרים בדפדפן הזה בלבד. כדאי להוריד גיבוי מדי פעם, ולהעביר איתו את העבודה למחשב אחר.'}</p>
+    </section>`;
 }
 
 // ---------------------------------------------------------------- imports
@@ -863,7 +1026,7 @@ function loadPdfjs() {
 }
 
 async function importRoster(file) {
-  notices.roster = { text: 'קורא את הקובץ…' };
+  notices.roster = { busy: true, text: 'קורא את הקובץ…' };
   render();
   try {
     const XLSX = await loadScript(XLSX_URL, 'XLSX');
@@ -896,7 +1059,7 @@ async function importRoster(file) {
 }
 
 async function importSchedule(file) {
-  notices.schedule = { text: 'קורא את הלו"ז… (כמה שניות)' };
+  notices.schedule = { busy: true, text: 'קורא את הלו"ז… (כמה שניות)' };
   render();
   try {
     const pdfjs = await loadPdfjs();
@@ -918,7 +1081,7 @@ async function importSchedule(file) {
     const attention = relevantChanges().filter(r => r.level === 'attention').length;
     if (attention) text += ` ${attention} שינויים דורשים בדיקה - מפורטים בלשונית "שיבוץ".`;
     notices.schedule = { text };
-    if (view === 'board' && result.report.length) toast(attention ? `הלו"ז עודכן - ${attention} שינויים דורשים בדיקה` : 'הלו"ז עודכן');
+    if (view === 'board' && result.report.length) toast(attention ? `הלו"ז עודכן · ${attention} שינויים לבדיקה` : 'הלו"ז עודכן');
     // Start from the first month of the new file.
     const firstMonth = dates[0]?.slice(0, 7);
     if (firstMonth && state.settings.month !== 'all' && state.settings.month !== firstMonth) state.settings.month = firstMonth;
@@ -945,12 +1108,28 @@ async function restoreBackup(file) {
 
 // ---------------------------------------------------------------- render & routing
 
-function render() {
-  for (const v of ['board', 'people', 'export', 'files']) {
+function renderChrome() {
+  $('#nav-title').textContent = VIEW_TITLES[view];
+  for (const v of Object.keys(VIEW_TITLES)) {
     $(`#view-${v}`).hidden = v !== view;
-    $(`#tab-${v}`).toggleAttribute('aria-current', v === view);
-    if (v === view) $(`#tab-${v}`).setAttribute('aria-current', 'page');
+    const tab = $(`#tab-${v}`);
+    if (v === view) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
   }
+  // Bar items: bare symbols; the screen's main action stays in the content.
+  const actions = {
+    board: hasData(state) ? `
+      <label class="icon-btn" title='עדכון לו"ז' aria-label='עדכון לו"ז'>${icon('arrow.clockwise')}<input type="file" id="file-schedule-quick" accept=".pdf,application/pdf" hidden></label>
+      <button class="icon-btn" data-act="add-event" title="אירוע ידני" aria-label="אירוע ידני">${icon('plus')}</button>` : '',
+    people: `<button class="icon-btn" data-act="add-person" title="הוספת מדריך/ה" aria-label="הוספת מדריך/ה">${icon('person.badge.plus')}</button>`,
+    export: `<button class="icon-btn" data-act="copy-doc" title="העתקת הטקסט" aria-label="העתקת הטקסט">${icon('doc.on.doc')}</button>`,
+    files: '',
+  };
+  $('#nav-actions').innerHTML = actions[view];
+}
+
+function render() {
+  renderChrome();
   if (view === 'board') renderBoard();
   else if (view === 'people') renderPeople();
   else if (view === 'export') renderExport();
@@ -959,6 +1138,7 @@ function render() {
 
 function go(v) {
   view = v;
+  closeMenu();
   render();
   window.scrollTo({ top: 0 });
 }
@@ -987,6 +1167,18 @@ function jumpTo(evId) {
 
 document.addEventListener('click', async e => {
   const t = e.target;
+
+  // Menus close on any click; a click on an item runs it.
+  if (menuHandlers) {
+    const item = t.closest('[data-menu]');
+    const handlers = menuHandlers;
+    closeMenu();
+    if (item) { handlers[+item.dataset.menu].run(); return; }
+    if (t.closest('[data-act="ev-menu"]')) return;
+  }
+  const alertBtn = t.closest('[data-alert]');
+  if (alertBtn) { const a = alertActions[+alertBtn.dataset.alert]; $('#alert').close(); a.run?.(); return; }
+
   const jump = t.closest('[data-jump]');
   if (jump) { jumpTo(jump.dataset.jump); return; }
   const goBtn = t.closest('[data-go]');
@@ -995,12 +1187,13 @@ document.addEventListener('click', async e => {
   if (tab) { go(tab.dataset.view); return; }
   if (t.closest('[data-close]')) { closeDialog(); return; }
 
-  // Dialog actions
+  // Sheet actions
   if (t.closest('#dialog')) {
     const pick = t.closest('[data-pick]');
     if (pick && dialogHandlers.pick) { dialogHandlers.pick(pick.dataset.pick); return; }
     const gact = t.closest('[data-gact]');
     if (gact && dialogHandlers.group) {
+      e.preventDefault();
       const row = gact.closest('[data-gi]');
       dialogHandlers.group(gact.dataset.gact, row ? +row.dataset.gi : -1);
       return;
@@ -1008,10 +1201,15 @@ document.addEventListener('click', async e => {
     const act = t.closest('[data-act]')?.dataset.act;
     if (act === 'pick-free') { const v = $('#pick-free').value.trim(); if (v) dialogHandlers.pick(v); return; }
     if (act === 'pick-clear') { dialogHandlers.clear(); return; }
-    if (act === 'slot-save' || act === 'event-save' || act === 'note-save' || act === 'avail-save' || act === 'person-save') { dialogHandlers.save(); return; }
+    if (act === 'sheet-done') { dialogHandlers.save?.(); return; }
     if (act === 'slot-delete') { dialogHandlers.remove(); return; }
     if (act === 'avail-reset') { dialogHandlers.reset(); return; }
-    if (t === dialog()) closeDialog(); // backdrop click
+    if (act === 'remind') {
+      const p = people().find(x => x.id === t.closest('[data-person]').dataset.person);
+      if (p) copyText(reminderText(p));
+      return;
+    }
+    if (t === dialog()) closeDialog(); // backdrop
     return;
   }
 
@@ -1032,26 +1230,12 @@ document.addEventListener('click', async e => {
 
   switch (act) {
     case 'expand': actEl.classList.toggle('clamp'); break;
-    case 'raw': evEl.querySelector('.raw').hidden = !evEl.querySelector('.raw').hidden; break;
-    case 'note': noteEditor(ev); break;
+    case 'ev-menu': eventMenu(actEl, ev); break;
     case 'dismiss-changes':
       if (state.lastImport) state.lastImport.dismissed = true;
       state.settings.onlyChanged = false;
       commit();
       break;
-    case 'delete-event':
-      state.events = state.events.filter(x => x !== ev);
-      commit();
-      toast('האירוע נמחק');
-      break;
-    case 'hide': ev.ignored = true; commit(); toast('האירוע הוסתר. אפשר להחזיר אותו דרך "הצג מוסתרים".'); break;
-    case 'unhide':
-      if (ev.ignored) ev.ignored = false;
-      else { ev.kind = ev.kind === 'other' ? 'study' : ev.kind; ev.kindOverride = ev.kind; }
-      commit();
-      if (!ev.slots.length) slotEditor(ev, newSlot(ev), true);
-      break;
-    case 'add-slot': slotEditor(ev, newSlot(ev), true); break;
     case 'edit-slot': {
       const slot = findSlot(ev, actEl.closest('[data-slot]').dataset.slot);
       if (slot) slotEditor(ev, slot, false);
@@ -1062,7 +1246,7 @@ document.addEventListener('click', async e => {
       const snapshot = clone(state.events);
       const targets = state.events.filter(x => eventShown(x) && !x.ignored && isRelevant(x));
       const n = autoFill({ instructors: people(), events: state.events, targets, settings: state.settings });
-      if (n) { autoUndo = snapshot; toast(`שובצו ${n} עמדות. העמדות בכחול שובצו אוטומטית - עברו עליהן.`); }
+      if (n) { autoUndo = snapshot; toast(`שובצו ${n} עמדות - הכחולות שובצו אוטומטית, כדאי לעבור עליהן`); }
       else toast('לא נמצאו מדריכים פנויים לעמדות החסרות');
       commit();
       break;
@@ -1071,14 +1255,9 @@ document.addEventListener('click', async e => {
       if (autoUndo) { state.events = autoUndo; autoUndo = null; toast('השיבוץ האוטומטי בוטל'); commit(); }
       break;
     case 'add-person': personEditor(); break;
-    case 'edit-avail': {
-      const p = people().find(x => x.id === actEl.closest('[data-person]').dataset.person);
-      if (p) availabilityEditor(p);
-      break;
-    }
-    case 'remind': {
-      const p = people().find(x => x.id === actEl.closest('[data-person]').dataset.person);
-      if (p) copyText(reminderText(p));
+    case 'open-person': {
+      const p = people().find(x => x.id === actEl.dataset.person);
+      if (p) personSheet(p);
       break;
     }
     case 'docx': {
@@ -1100,22 +1279,24 @@ document.addEventListener('click', async e => {
       break;
     }
     case 'backup': {
-      const date = todayISO();
-      try { await saveFile(`גיבוי שיבוץ מדריכים ${date}.json`, JSON.stringify(state)); } catch (err) { toast('ההורדה נכשלה: ' + (err.message || err.code)); }
+      try { await saveFile(`גיבוי שיבוץ מדריכים ${todayISO()}.json`, JSON.stringify(state)); } catch (err) { toast('ההורדה נכשלה: ' + (err.message || err.code)); }
       break;
     }
     case 'reset':
-      if (!actEl.classList.contains('armed')) {
-        actEl.classList.add('armed');
-        actEl.textContent = 'לחצו שוב למחיקה סופית';
-        setTimeout(() => { if (actEl.isConnected) { actEl.classList.remove('armed'); actEl.textContent = 'מחיקת כל הנתונים'; } }, 4000);
-      } else {
-        state = emptyState();
-        autoUndo = null;
-        notices.roster = notices.schedule = null;
-        toast('כל הנתונים נמחקו');
-        commit();
-      }
+      openAlert({
+        title: 'למחוק את כל הנתונים?',
+        message: 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהאתר. אי אפשר לבטל את זה - כדאי להוריד גיבוי קודם.',
+        actions: [
+          { label: 'ביטול', cls: 'btn-gray' },
+          { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: () => {
+            state = emptyState();
+            autoUndo = null;
+            notices.roster = notices.schedule = null;
+            toast('כל הנתונים נמחקו');
+            commit();
+          } },
+        ],
+      });
       break;
     default: break;
   }
@@ -1123,21 +1304,11 @@ document.addEventListener('click', async e => {
 
 document.addEventListener('change', e => {
   const t = e.target;
+  if (t.closest('#dialog')) return; // sheets save on Done
   const s = state.settings;
   if (t.dataset.filter) { s[t.dataset.filter][t.value] = t.checked; commit(); return; }
   if (t.dataset.toggle) { s[t.dataset.toggle] = t.checked; commit(); return; }
   if (t.dataset.setting === 'month') { s.month = t.value; commit(); return; }
-
-  const personRow = t.closest('[data-person]');
-  if (personRow) {
-    const p = people().find(x => x.id === personRow.dataset.person);
-    if (!p) return;
-    if (t.dataset.role) editPerson(p.id, { roles: { ...p.roles, [t.dataset.role]: t.checked } });
-    else if (t.hasAttribute('data-active')) editPerson(p.id, { active: t.checked });
-    else if (t.hasAttribute('data-safety')) editPerson(p.id, { safetyOk: t.checked });
-    commit();
-    return;
-  }
 
   if (t.id === 'x-month') { state.exportOptions.month = t.value; commit(); return; }
   if (t.id === 'x-location') { state.exportOptions.location = t.checked; commit(); return; }
@@ -1145,9 +1316,9 @@ document.addEventListener('change', e => {
 
   if (t.id === 'file-roster' && t.files[0]) importRoster(t.files[0]);
   if ((t.id === 'file-schedule' || t.id === 'file-schedule-quick') && t.files[0]) importSchedule(t.files[0]);
+  if (t.id === 'file-backup' && t.files[0]) restoreBackup(t.files[0]);
   // The schedule file often keeps its name; clearing lets the same file be picked again.
   if (t.type === 'file') setTimeout(() => { t.value = ''; }, 0);
-  if (t.id === 'file-backup' && t.files[0]) restoreBackup(t.files[0]);
 });
 
 let notesTimer = null;
@@ -1179,6 +1350,7 @@ document.addEventListener('input', e => {
 });
 
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && menuHandlers) { closeMenu(); return; }
   if (e.key !== 'Enter') return;
   if (e.target.id === 'pick-search') {
     const first = [...document.querySelectorAll('#pick-body .cand')].find(c => !c.hidden);
@@ -1212,12 +1384,21 @@ document.addEventListener('drop', e => {
 });
 
 $('#dialog').addEventListener('close', () => { dialogHandlers = {}; });
-document.addEventListener('toggle', e => { if (e.target.classList?.contains('filters-box')) filtersOpen = e.target.open; }, true);
+document.addEventListener('toggle', e => { if (e.target.id === 'filters-box') filtersOpen = e.target.open; }, true);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+window.addEventListener('resize', closeMenu);
+// The bar firms into a band once content scrolls beneath it.
+const navbar = $('#navbar');
+const onScroll = () => {
+  navbar.dataset.scrolled = String(window.scrollY > 24);
+  if (menuHandlers && Math.abs(window.scrollY - menuScrollY) > 40) closeMenu();
+};
+window.addEventListener('scroll', onScroll, { passive: true });
 
 // ---------------------------------------------------------------- start
 
 async function start() {
+  document.querySelectorAll('[data-icon]').forEach(el => { el.outerHTML = icon(el.dataset.icon); });
   render();
   store = await openStore();
   let saved = null;
@@ -1228,7 +1409,6 @@ async function start() {
     const d = demoState();
     state = { ...emptyState(), instructors: d.instructors, events: d.events };
     demo = true;
-    $('#demo-banner').hidden = false;
   }
   personIndex = null;
   render();
