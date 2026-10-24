@@ -92,15 +92,6 @@ export async function writeFile(cfg, text, sha, message) {
   return out.content.sha;
 }
 
-/** Delete the file. Its earlier versions stay in the repository's history. Returns false if it was already gone. */
-export async function deleteFile(cfg, sha, message) {
-  const res = await call(cfg, filePath(cfg), { method: 'DELETE', body: { message, sha } });
-  if (res.status === 404) return false;
-  if (res.status === 409 || res.status === 422) throw new SyncError('הקובץ השתנה בינתיים', 'conflict');
-  if (!res.ok) throw new SyncError(`המחיקה ב-GitHub נכשלה (${res.status})`, 'http');
-  return true;
-}
-
 /** The link that connects another device: the repository and the token, in the URL fragment only. */
 export function connectLink(cfg, base) {
   const payload = JSON.stringify({ r: `${cfg.owner}/${cfg.repo}`, p: cfg.path || DEFAULT_PATH, t: cfg.token });

@@ -5,7 +5,7 @@ import { createNameMatcher } from '../js/names.js';
 import { parseCells } from '../js/schedule-parser.js';
 import { parseRosterRows } from '../js/roster.js';
 import { mergeSchedule } from '../js/scheduling.js';
-import { stampChanges, mergeStates, describeChanges, packState, unpackState } from '../js/sync.js';
+import { stampChanges, mergeStates, describeChanges, packState, unpackState, erasedSince } from '../js/sync.js';
 
 const rows = [
   ['שם', 'טלפון', 'הדרכה', 'הדרכת בטיחות', 'הערות'],
@@ -171,4 +171,33 @@ test('an old backup file (bare state, no stamps) is still accepted', () => {
   delete legacy.settings;
   assert.ok(unpackState(legacy));
   assert.equal(unpackState({ hello: 1 }), null);
+});
+
+test('"delete everything" wins over older data in both directions, and a new start merges normally', () => {
+  const a = device(), b = device();
+  a.import(cells, at(1));
+  b.import(cells, at(1));
+  a.assign('תיכון א', 0, 0, 'רון אלמוג', at(2));
+  b.assign('תיכון ב', 0, 0, 'תמר גל', at(3));
+  // A erases everything (a fresh state with a new generation).
+  a.state = { ...device().state, events: [], instructors: [], imports: { roster: null, schedule: [] }, resetAt: at(5) };
+  a.snap = clone(a.state);
+  assert.equal(erasedSince(b.state, a.state), true);
+  // B's older work does not come back into A...
+  a.receive(b, at(6));
+  assert.equal(a.state.events.length, 0);
+  // ...and B, receiving A, is erased too (its view settings stay).
+  b.state.settings = { month: '2026-11' };
+  b.receive(a, at(7));
+  assert.equal(b.state.events.length, 0);
+  assert.equal(b.state.settings.month, '2026-11');
+  // After the erase both start over: same generation, ordinary merge.
+  a.import(cells, at(10));
+  a.assign('תיכון א', 0, 1, 'דנה לוי', at(11));
+  b.import(cells, at(12));
+  b.assign('תיכון ב', 0, 1, 'עומר בן חיים', at(13));
+  a.receive(b, at(14));
+  assert.equal(a.pos('תיכון א', 0, 1).name, 'דנה לוי');
+  assert.equal(a.pos('תיכון ב', 0, 1).name, 'עומר בן חיים');
+  assert.equal(a.state.resetAt, at(5));
 });

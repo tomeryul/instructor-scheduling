@@ -155,6 +155,14 @@ function newerById(a = [], b = []) {
  * value from either side. Deletions are kept as dated tombstones.
  */
 export function mergeStates(local, remote, now = Date.now()) {
+  // "Delete everything" starts a new generation. Data from an older generation
+  // was made before the erase, so it never comes back through a merge.
+  const localGen = local.resetAt || 0, remoteGen = remote.resetAt || 0;
+  if (localGen !== remoteGen) {
+    const out = clone(remoteGen > localGen ? remote : local);
+    for (const k of LOCAL_FIELDS) if (local[k] !== undefined) out[k] = clone(local[k]);
+    return out;
+  }
   // On a tie the remote side is the base, so two devices settle on the same
   // copy instead of handing an unstamped difference back and forth.
   const remoteNewer = lastImportAt(remote) >= lastImportAt(local);
@@ -224,6 +232,9 @@ export function mergeStates(local, remote, now = Date.now()) {
   base.updatedAt = Math.max(local.updatedAt || 0, remote.updatedAt || 0);
   return base;
 }
+
+/** Was everything erased on the other side after this side's data was made? */
+export const erasedSince = (mine, theirs) => (theirs.resetAt || 0) > (mine.resetAt || 0);
 
 /** What a merge changed on this device, for a one-line summary. */
 export function describeChanges(before, after) {

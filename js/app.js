@@ -11,8 +11,8 @@ import {
 } from './scheduling.js';
 import { buildDocument, toHtml, toPlainText, toDocxBlob, dayLabel, shortDate, monthLabel } from './export.js';
 import { openStore, saveFile, loadScript } from './storage.js';
-import { stampChanges, mergeStates, describeChanges, packState, unpackState, sharedState } from './sync.js';
-import { parseRepo, checkRepo, readFile, writeFile, deleteFile, connectLink, readConnectLink, DEFAULT_PATH } from './github-sync.js';
+import { stampChanges, mergeStates, describeChanges, packState, unpackState, sharedState, erasedSince } from './sync.js';
+import { parseRepo, checkRepo, readFile, writeFile, connectLink, readConnectLink, DEFAULT_PATH } from './github-sync.js';
 import { demoState } from './demo.js';
 import { icon } from './icons.js';
 
@@ -65,6 +65,7 @@ function emptyState() {
     lastImport: null,
     deleted: { events: {}, slots: {} },
     updatedAt: 0,
+    resetAt: 0, // when everything was last erased everywhere; older data never merges back in
   };
 }
 
@@ -1058,8 +1059,11 @@ function renderFiles() {
     </section>
     <section class="list-section">
       <div class="list">
-        ${syncOn() ? `<button class="row action destructive" data-act="sync-delete">${icon('trash')}<span class="row-main">מחיקת הנתונים מ-GitHub</span></button>` : ''}
-        <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">מחיקת כל הנתונים מהמכשיר הזה</span></button>
+        ${syncOn() ? `<button class="row action destructive" data-act="erase-all">${icon('trash')}<span class="row-main"><span class="row-title">מחיקת הכול, בכל מקום</span><span class="row-sub">כאן, ב-GitHub ובמכשירים המחוברים האחרים</span></span></button>` : ''}
+        <button class="row action destructive" data-act="reset" ${demo ? 'disabled' : ''}>${icon('trash')}<span class="row-main">${
+  store?.kind === 'db' ? 'מחיקת כל הנתונים'
+  : syncOn() ? '<span class="row-title">מחיקה מהמכשיר הזה בלבד</span><span class="row-sub">ב-GitHub הנתונים נשארים, והמכשיר מתנתק מהסנכרון</span>'
+  : 'מחיקת כל הנתונים מהמכשיר הזה'}</span></button>
       </div>
     </section>`;
 }
@@ -1300,13 +1304,15 @@ async function receiveFile(file) {
   const incoming = unpackState(data);
   if (!incoming) { toast('זה לא קובץ שנשלח מהאתר'); return; }
   const from = data.device || 'הקובץ';
+  if (!demo && erasedSince(incoming, state)) { toast(`הקובץ מ-${isolate(from)} נוצר לפני שכל הנתונים נמחקו, ולכן לא יובא`); return; }
+  const erased = !demo && erasedSince(state, incoming);
   const wasDemo = demo;
   const wasClean = !wasDemo && syncState.localHash === device.sentHash;
   const sentHashBefore = device.sentHash;
   leaveDemo();
   const before = clone(state);
   const merged = mergeStates(state, incoming);
-  const text = changesText(describeChanges(before, merged), from);
+  const text = erased ? `כל הנתונים נמחקו ב-${isolate(from)}, וגם המכשיר הזה התאפס` : changesText(describeChanges(before, merged), from);
   replaceState(merged);
   // Nothing was waiting to be sent, and what arrived is already on the other device: still nothing to send.
   if (wasClean || wasDemo) device.sentHash = syncState.localHash;
@@ -1362,7 +1368,10 @@ function noteLocalChange() {
 /** What is waiting: work on this device that was not saved, or work in the file that was not imported here. */
 function syncFlags() {
   if (store?.kind !== 'local' || demo || !hasData(state)) return { unsaved: false, news: false };
-  if (syncOn()) return { unsaved: syncState.localHash !== syncCfg.cleanHash, news: !!syncCfg.sha && syncCfg.sha !== syncCfg.importedSha };
+  if (syncOn()) {
+    const news = !!syncCfg.sha && syncCfg.sha !== syncCfg.importedSha;
+    return { unsaved: syncState.localHash !== syncCfg.cleanHash, news, erased: news && (syncCfg.remoteResetAt || 0) > (state.resetAt || 0) };
+  }
   // Without GitHub, only once files have gone between devices - one device on its own is never "unsaved".
   const usesFiles = !!(device.sentHash || device.received);
   return { unsaved: usesFiles && syncState.localHash !== device.sentHash, news: false };
@@ -1398,6 +1407,7 @@ async function runSync(mode = 'both', { manual = false } = {}) {
   let imported = '';
   let wrote = false;
   let leftUnimported = false;
+  let blockedByErase = false;
   try {
     for (let attempt = 0; ; attempt++) {
       if (attempt > 6) throw new Error('GitHub לא הגיב כמצופה - נסו שוב');
@@ -1406,10 +1416,10 @@ async function runSync(mode = 'both', { manual = false } = {}) {
       if (remote && !remote.notModified) {
         incoming = unpackState(remote.data);
         if (!incoming) throw new Error('הקובץ ב-GitHub לא נראה כמו קובץ של האתר');
-        Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming), remoteDevice: remote.data.device || null, remoteAt: remote.data.savedAt || null });
+        Object.assign(cfg, { sha: remote.sha, etag: remote.etag, remoteHash: sharedHash(incoming), remoteDevice: remote.data.device || null, remoteAt: remote.data.savedAt || null, remoteResetAt: incoming.resetAt || 0 });
       } else if (!remote) {
         if (cfg.sha) cfg.cleanHash = null;
-        Object.assign(cfg, { sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null });
+        Object.assign(cfg, { sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null, remoteResetAt: 0 });
       }
       const news = !!cfg.sha && cfg.sha !== cfg.importedSha;
       if (mode === 'check') break;
@@ -1420,12 +1430,16 @@ async function runSync(mode = 'both', { manual = false } = {}) {
         const wasDemo = demo && hasData(withDefaults(incoming));
         if (wasDemo) leaveDemo();
         if (!demo) {
-          const wasClean = wasDemo || syncState.localHash === cfg.cleanHash;
+          const erased = erasedSince(state, incoming);
+          const wasClean = wasDemo || erased || syncState.localHash === cfg.cleanHash;
           const before = clone(state);
           const merged = mergeStates(state, incoming);
           if (canon(sharedState(merged)) !== canon(sharedState(before))) {
             replaceState(merged);
-            imported = wasDemo ? `הנתונים נטענו מ-${isolate(`${cfg.owner}/${cfg.repo}`)}` : changesText(describeChanges(before, merged), cfg.remoteDevice || 'מכשיר אחר');
+            if (erased) { notices.roster = notices.schedule = null; render(); }
+            imported = erased
+              ? `כל הנתונים נמחקו מ-${isolate(cfg.remoteDevice || 'מכשיר אחר')}${cfg.remoteAt ? ` (${whenLabel(cfg.remoteAt)})` : ''}, וגם המכשיר הזה התאפס`
+              : wasDemo ? `הנתונים נטענו מ-${isolate(`${cfg.owner}/${cfg.repo}`)}` : changesText(describeChanges(before, merged), cfg.remoteDevice || 'מכשיר אחר');
           }
           if (wasClean) cfg.cleanHash = syncState.localHash;
           cfg.importedAt = new Date().toISOString();
@@ -1436,6 +1450,8 @@ async function runSync(mode = 'both', { manual = false } = {}) {
       if (mode === 'push' || mode === 'both') {
         if (demo) break; // never write the sample data
         const unimported = !!cfg.sha && cfg.sha !== cfg.importedSha;
+        // Everything was erased there after this device's data was made: saving must not bring it back.
+        if (unimported && erasedSince(state, incoming)) { blockedByErase = true; break; }
         const out = unimported ? mergeStates(state, incoming) : state;
         const outHash = unimported ? sharedHash(out) : syncState.localHash;
         // Automatic runs stop after a few writes without a new edit, so two devices cannot bounce a change.
@@ -1461,6 +1477,7 @@ async function runSync(mode = 'both', { manual = false } = {}) {
     syncState.error = null;
     const waiting = leftUnimported ? ` · יש שם גם עדכון מ-${isolate(cfg.remoteDevice || 'מכשיר אחר')} שעוד לא יובא לכאן` : '';
     if (mode === 'pull' && manual) toast(imported || (cfg.sha ? 'אין חדש ב-GitHub - המכשיר הזה כבר מעודכן' : 'ב-GitHub אין כרגע נתונים לייבוא'));
+    else if (mode === 'push' && manual && blockedByErase) toast(`לא נשמר: כל הנתונים ב-GitHub נמחקו מ-${isolate(cfg.remoteDevice || 'מכשיר אחר')}. "ייבוא" ימחק אותם גם כאן.`);
     else if (mode === 'push' && manual) toast((wrote ? 'נשמר ב-GitHub' : 'כבר שמור ב-GitHub - אין שינויים חדשים') + waiting);
     else if (mode === 'both' && manual) toast([imported, wrote ? 'נשמר ב-GitHub' : ''].filter(Boolean).join(' · ') || 'הכול מסונכרן - אין שינויים');
     else if (imported) toast(imported);
@@ -1484,6 +1501,7 @@ function syncSummary() {
   const f = syncFlags();
   if (!syncCfg.sha) return demo || !hasData(state) ? 'ב-GitHub אין כרגע נתונים.' : 'ב-GitHub אין כרגע נתונים. "שמירה" תעלה לשם את מה שיש במכשיר הזה.';
   const lines = [f.unsaved ? 'יש במכשיר הזה שינויים שלא נשמרו ב-GitHub.' : 'כל העבודה במכשיר הזה שמורה ב-GitHub.'];
+  if (f.erased) return `כל הנתונים ב-GitHub נמחקו מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` (${whenLabel(syncCfg.remoteAt)})` : ''}. "ייבוא" ימחק אותם גם כאן.`;
   if (f.news) lines.push(`יש עדכון מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` (${whenLabel(syncCfg.remoteAt)})` : ''} שעוד לא יובא.`);
   return lines.join(' ');
 }
@@ -1563,7 +1581,18 @@ function syncNotice() {
       <button class="btn btn-tinted btn-small" data-go="files">פרטים</button>
     </div></div>`;
   }
-  if (syncAuto() || !syncFlags().news) return '';
+  const f = syncFlags();
+  if (syncAuto() || !f.news) return '';
+  const from = `מ-${isolate(syncCfg.remoteDevice || 'מכשיר אחר')}${syncCfg.remoteAt ? ` · ${whenLabel(syncCfg.remoteAt)}` : ''}`;
+  if (f.erased) {
+    return `
+    <div class="list"><div class="notice">
+      <span class="row-icon bad">${icon('trash')}</span>
+      <div class="row-main"><span class="row-title"><b>כל הנתונים נמחקו ב-GitHub</b></span>
+        <span class="row-sub">${esc(`${from}. המכשיר הזה עדיין מחזיק את הנתונים הישנים; "ייבוא" ימחק אותם גם כאן.`)}</span></div>
+      <button class="btn btn-tinted btn-small" data-act="sync-pull">ייבוא</button>
+    </div></div>`;
+  }
   return `
     <div class="list"><div class="notice">
       <span class="row-icon">${icon('square.and.arrow.down')}</span>
@@ -1679,35 +1708,43 @@ async function syncShare() {
   }
 }
 
-/** Delete the data file from GitHub. This device keeps its data; automatic sync is turned off so it does not write it back. */
-async function syncDeleteRemote() {
+/**
+ * Erase everything, here and in GitHub. The file is not deleted but replaced by
+ * an empty state with a new generation, so other devices erase their copy when
+ * they import it, and their old data can never be saved back over it.
+ */
+async function eraseEverywhere() {
   if (!syncOn()) return;
   if (syncState.busy) { toast('רגע - פעולה אחרת מול GitHub עדיין רצה'); return; }
   const cfg = syncCfg;
-  const wasAuto = !!cfg.auto;
   clearTimeout(syncState.timer);
   Object.assign(syncState, { queued: null, pending: null, busy: 'delete' });
   renderSyncBits();
+  const fresh = { ...emptyState(), settings: clone(state.settings), exportOptions: clone(state.exportOptions), resetAt: Date.now() };
   try {
-    let deleted = false;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // GitHub first: if that fails, nothing is erased anywhere.
+    let sha = null;
+    for (let attempt = 0; ; attempt++) {
       const remote = await readFile(cfg);
-      if (!remote) break;
       try {
-        deleted = await deleteFile(cfg, remote.sha, `מחיקת הנתונים מ-${device.name}`);
+        sha = await writeFile(cfg, JSON.stringify(packState(fresh, device.name)), remote ? remote.sha : null, `מחיקת כל הנתונים מ-${device.name}`);
         break;
       } catch (e) {
-        if (e.code !== 'conflict' || attempt === 2) throw e; // someone saved in between: read again and delete that
+        if (e.code !== 'conflict' || attempt >= 3) throw e; // someone saved in between: erase that too
       }
     }
-    Object.assign(cfg, { auto: false, sha: null, etag: null, remoteHash: null, remoteDevice: null, remoteAt: null, importedSha: null, cleanHash: null });
+    leaveDemo();
+    replaceState(fresh);
+    notices.roster = notices.schedule = null;
+    Object.assign(device, { sentHash: null, received: null });
+    saveDevice();
+    const hash = syncState.localHash;
+    Object.assign(cfg, { sha, etag: null, remoteHash: hash, importedSha: sha, cleanHash: hash, remoteDevice: device.name, remoteAt: new Date().toISOString(), remoteResetAt: fresh.resetAt });
     syncState.error = null;
-    toast(deleted
-      ? `הנתונים נמחקו מ-GitHub. במכשיר הזה הם נשארו${wasAuto ? ', והסנכרון האוטומטי כובה' : ''}.`
-      : 'ב-GitHub כבר לא היו נתונים.');
+    toast('כל הנתונים נמחקו, כאן וב-GitHub. מכשירים מחוברים אחרים יתאפסו בייבוא הבא שלהם.');
   } catch (e) {
     syncState.error = e;
-    toast('המחיקה נכשלה: ' + e.message);
+    toast('המחיקה נכשלה, ושום דבר לא נמחק: ' + e.message);
   } finally {
     if (syncCfg === cfg) saveSyncCfg();
     syncState.busy = null;
@@ -1903,24 +1940,24 @@ document.addEventListener('click', async e => {
     case 'sync-push': runSync('push', { manual: true }); break;
     case 'sync-pull': runSync('pull', { manual: true }); break;
     case 'sync-both': runSync('both', { manual: true }); break;
-    case 'sync-delete':
+    case 'erase-all':
       openAlert({
-        title: 'למחוק את הנתונים מ-GitHub?',
-        message: `קובץ הנתונים יימחק מהריפו ${isolate(`${syncCfg.owner}/${syncCfg.repo}`)}. במכשיר הזה הנתונים נשארים${syncCfg.auto ? ', והסנכרון האוטומטי ייכבה' : ''}. מכשיר אחר שעדיין מחובר יעלה אותם שוב אם ילחצו בו "שמירה" או אם מופעל בו סנכרון אוטומטי. GitHub שומר גרסאות קודמות בהיסטוריה של הריפו; למחיקה מוחלטת מוחקים את הריפו עצמו בהגדרות שלו.`,
+        title: 'למחוק את כל הנתונים בכל מקום?',
+        message: 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה ומ-GitHub. מכשירים מחוברים אחרים יימחקו בייבוא הבא שלהם, ומה שנשאר בהם כבר לא יעלה בחזרה. אי אפשר לבטל את זה מהאתר (GitHub שומר את הגרסאות הקודמות בהיסטוריה של הריפו).',
         actions: [
           { label: 'ביטול', cls: 'btn-gray' },
-          { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: syncDeleteRemote },
+          { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: eraseEverywhere },
         ],
       });
       break;
-    case 'sync-share': syncShare(); break;
-    case 'sync-off': syncOff(); break;
     case 'reset':
       openAlert({
-        title: 'למחוק את כל הנתונים?',
-        message: syncOn()
-          ? 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה, והסנכרון בו ינותק. הקובץ ב-GitHub נשאר כמו שהוא.'
-          : 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה. אי אפשר לבטל את זה - כדאי לשלוח קודם עותק למכשיר אחר.',
+        title: syncOn() ? 'למחוק רק מהמכשיר הזה?' : 'למחוק את כל הנתונים?',
+        message: store?.kind === 'db'
+          ? 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהחשבון שלכם ב-claude.ai, בכל המכשירים. אי אפשר לבטל את זה.'
+          : syncOn()
+            ? 'הנתונים יימחקו מהמכשיר הזה, והוא יתנתק מהסנכרון. ב-GitHub הם נשארים, וחיבור מחדש יחזיר אותם. כדי למחוק בכל מקום: "מחיקת הכול, בכל מקום".'
+            : 'המדריכים, האירועים, השיבוצים וההערות יימחקו מהמכשיר הזה. אי אפשר לבטל את זה - כדאי לשלוח קודם עותק למכשיר אחר.',
         actions: [
           { label: 'ביטול', cls: 'btn-gray' },
           { label: 'מחיקה', cls: 'btn-prominent btn-destructive', run: () => {
@@ -1931,7 +1968,7 @@ document.addEventListener('click', async e => {
             snapshot = clone(state);
             autoUndo = null;
             notices.roster = notices.schedule = null;
-            toast('כל הנתונים נמחקו מהמכשיר הזה');
+            toast(store?.kind === 'db' ? 'כל הנתונים נמחקו' : 'כל הנתונים נמחקו מהמכשיר הזה');
             commit();
           } },
         ],
