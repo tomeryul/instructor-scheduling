@@ -1052,7 +1052,7 @@ function renderFiles() {
     <section class="list-section">
       <h3 class="list-header">העברה בקובץ</h3>
       <div class="list">
-        <button class="row action" data-act="send" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main">שליחה למכשיר אחר</span></button>
+        <button class="row action" data-act="send" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main"><span class="row-title">שליחה למכשיר אחר</span>${demo ? '<span class="row-sub">זמין אחרי ייבוא הקבצים שלכם (עכשיו מוצגים נתוני דוגמה)</span>' : ''}</span></button>
         <label class="row action">${icon('tray.and.arrow.down')}<span class="row-main">קבלה ממכשיר אחר</span><input type="file" id="file-receive" accept=".json,.txt,application/json,text/plain" hidden></label>
       </div>
       <p class="list-footer">${transferFooter()}</p>
@@ -1082,7 +1082,7 @@ function devicesSection() {
       <h3 class="list-header">סנכרון עם GitHub</h3>
       <div class="list">
         <div class="row" id="sync-status">${syncStatusHtml()}</div>
-        <button class="row action" data-act="sync-push" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main"><span class="row-title">שמירה ל-GitHub</span><span class="row-sub">בסוף עבודה: שולח את מה שנעשה במכשיר הזה</span></span></button>
+        <button class="row action" data-act="sync-push" ${demo ? 'disabled' : ''}>${icon('square.and.arrow.up')}<span class="row-main"><span class="row-title">שמירה ל-GitHub</span><span class="row-sub">${demo ? 'זמין אחרי ייבוא הקבצים שלכם (עכשיו מוצגים נתוני דוגמה)' : 'בסוף עבודה: שולח את מה שנעשה במכשיר הזה'}</span></span></button>
         <button class="row action" data-act="sync-pull">${icon('square.and.arrow.down')}<span class="row-main"><span class="row-title">ייבוא מ-GitHub</span><span class="row-sub">בתחילת עבודה: מביא את מה שנשמר במכשירים אחרים</span></span></button>
         <button class="row action" data-act="sync-both">${icon('arrow.triangle.2.circlepath')}<span class="row-main"><span class="row-title">סנכרון</span><span class="row-sub">ייבוא ושמירה בלחיצה אחת</span></span></button>
         <label class="row"><span class="row-main"><span class="row-title">סנכרון אוטומטי</span><span class="row-sub">שומר ומייבא לבד, בלי ללחוץ</span></span><input type="checkbox" role="switch" class="switch" id="sync-auto" ${syncCfg.auto ? 'checked' : ''}></label>
@@ -1335,7 +1335,7 @@ async function receiveFile(file) {
 //   cleanHash - this device's data as it was last saved (or when it had nothing unsaved);
 //   savedAt, importedAt, at }
 let syncCfg = readLocal(SYNC_KEY);
-const syncState = { busy: null, pending: null, queued: null, error: null, timer: null, autoPushes: 0, localHash: null };
+const syncState = { busy: null, pending: null, pendingManual: false, queued: null, error: null, timer: null, autoPushes: 0, localHash: null };
 const syncOn = () => !!syncCfg && store?.kind === 'local';
 const syncAuto = () => syncOn() && !!syncCfg.auto;
 const saveSyncCfg = () => writeLocal(SYNC_KEY, syncCfg);
@@ -1345,7 +1345,8 @@ const BUSY_TEXT = { push: 'שומר ב-GitHub…', pull: 'מייבא מ-GitHub�
 const strongest = (a, b) => (!a ? b : !b ? a : a === b ? a : a === 'check' ? b : b === 'check' ? a : 'both');
 
 // Never swap the data under an open sheet, menu or a field being typed in.
-const uiBusy = () => $('#dialog').open || $('#alert').open || !!menuHandlers
+const modalOpen = () => $('#dialog').open || $('#alert').open || !!menuHandlers;
+const uiBusy = () => modalOpen()
   || !!document.activeElement?.matches?.('main textarea, main input[type="search"], main input[type="text"], main input:not([type])');
 
 /** JSON with sorted keys, so equal states compare equal whatever order they were built in. */
@@ -1387,8 +1388,10 @@ function scheduleSync(mode = 'both', delay = 2500) {
 function resumePending(delay = 800) {
   if (!syncState.pending || syncState.busy) return;
   const m = syncState.pending;
-  syncState.pending = null;
-  scheduleSync(m, delay);
+  const manual = syncState.pendingManual;
+  Object.assign(syncState, { pending: null, pendingManual: false });
+  if (manual) runSync(m, { manual: true });
+  else scheduleSync(m, delay);
 }
 
 /**
@@ -1400,7 +1403,16 @@ function resumePending(delay = 800) {
  */
 async function runSync(mode = 'both', { manual = false } = {}) {
   if (!syncOn()) return;
-  if (syncState.busy) { syncState.pending = strongest(syncState.pending, mode); return; }
+  if (syncState.busy) {
+    syncState.pending = strongest(syncState.pending, mode);
+    if (manual) {
+      syncState.pendingManual = true;
+      toast(`${BUSY_TEXT[syncState.busy]} הפעולה שביקשתם תתבצע מיד אחרי זה.`);
+    }
+    return;
+  }
+  // Safari leaves the cursor in a text field after a tap on a button; a press means the user is done typing.
+  if (manual && document.activeElement?.matches?.('input, textarea')) document.activeElement.blur();
   const cfg = syncCfg;
   syncState.busy = mode;
   renderSyncBits();
@@ -1426,7 +1438,7 @@ async function runSync(mode = 'both', { manual = false } = {}) {
       if (news && !incoming) { cfg.etag = null; continue; } // the file changed: read it in full
 
       if ((mode === 'pull' || mode === 'both') && news) {
-        if (uiBusy()) { syncState.pending = strongest(syncState.pending, mode); return; }
+        if (manual ? modalOpen() : uiBusy()) { syncState.pending = strongest(syncState.pending, mode); if (manual) syncState.pendingManual = true; return; }
         const wasDemo = demo && hasData(withDefaults(incoming));
         if (wasDemo) leaveDemo();
         if (!demo) {
@@ -1488,7 +1500,8 @@ async function runSync(mode = 'both', { manual = false } = {}) {
     if (syncCfg === cfg) saveSyncCfg();
     syncState.busy = null;
     renderSyncBits();
-    if (!uiBusy()) resumePending();
+    // A waiting press runs now unless a sheet is open (closing it resumes); automatic runs also wait for typing to end.
+    if (syncState.pendingManual ? !modalOpen() : !uiBusy()) resumePending();
   }
 }
 
@@ -1529,7 +1542,7 @@ function syncMenu(anchor) {
   const items = syncOn()
     ? [
       { header: syncSummary() },
-      { label: 'שמירה ל-GitHub', sub: 'שולח את העבודה מהמכשיר הזה', icon: 'square.and.arrow.up', disabled: demo, run: () => runSync('push', { manual: true }) },
+      { label: 'שמירה ל-GitHub', sub: demo ? 'אין מה לשמור - אלה נתוני דוגמה' : 'שולח את העבודה מהמכשיר הזה', icon: 'square.and.arrow.up', disabled: demo, run: () => runSync('push', { manual: true }) },
       { label: 'ייבוא מ-GitHub', sub: 'מביא את מה שנשמר במכשירים אחרים', icon: 'square.and.arrow.down', run: () => runSync('pull', { manual: true }) },
       { label: 'סנכרון', sub: 'ייבוא ושמירה בלחיצה אחת', icon: 'arrow.triangle.2.circlepath', run: () => runSync('both', { manual: true }) },
       '-',
@@ -1537,7 +1550,7 @@ function syncMenu(anchor) {
     ]
     : [
       { header: fileSummary() },
-      { label: 'שליחה למכשיר אחר', sub: 'קובץ עם כל העבודה', icon: 'square.and.arrow.up', disabled: demo, run: sendToDevice },
+      { label: 'שליחה למכשיר אחר', sub: demo ? 'אין מה לשלוח - אלה נתוני דוגמה' : 'קובץ עם כל העבודה', icon: 'square.and.arrow.up', disabled: demo, run: sendToDevice },
       { label: 'קבלה ממכשיר אחר', sub: 'ממזג קובץ שנשלח ממכשיר אחר', icon: 'square.and.arrow.down', run: pickReceiveFile },
       '-',
       { label: 'סנכרון דרך GitHub', icon: 'arrow.triangle.2.circlepath', run: syncSetup },

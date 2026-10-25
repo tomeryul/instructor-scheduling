@@ -314,6 +314,9 @@ main.page {
 .row-value { color: var(--label-2); flex: none; font-variant-numeric: tabular-nums; }
 .chevron { inline-size: 14px; block-size: 14px; color: var(--label-3); flex: none; transform: scaleX(-1); }
 button.row, label.row { inline-size: 100%; border: 0; background: none; text-align: start; font: inherit; cursor: pointer; }
+button.row:disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+/* A dialog that is animating closed must not catch taps meant for the page. */
+dialog:not([open]) { pointer-events: none; }
 button.row:active, label.row:active { background: var(--fill-4); }
 .row.action { color: var(--accent-text); font-weight: 500; }
 .row.action.destructive { color: var(--red); }
@@ -555,7 +558,8 @@ a.row { text-decoration: none; }
   background: var(--bg-elevated); color: var(--label); box-shadow: var(--menu-shadow); border: 0.5px solid var(--separator);
 }
 @media (min-width: 900px) { .toast { inset-block-end: 24px; } }
-.toast-action { border: 0; background: none; color: var(--accent-text); font: inherit; font-weight: 600; padding: 8px 4px; margin-block: -8px; min-block-size: 44px; cursor: pointer; }
+.toast { pointer-events: none; } /* taps go through to what is underneath; only its button takes them */
+.toast-action { pointer-events: auto; border: 0; background: none; color: var(--accent-text); font: inherit; font-weight: 600; padding: 8px 4px; margin-block: -8px; min-block-size: 44px; cursor: pointer; }
 .toast-action:active { opacity: 0.5; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; }
