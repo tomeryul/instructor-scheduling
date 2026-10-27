@@ -1561,10 +1561,13 @@ function syncMenu(anchor) {
 /** Refresh every place that shows the sync state, without redrawing the page under the user. */
 let shownSyncKey = '';
 function renderSyncBits() {
+  // Replace only what changed: swapping a button for an identical copy loses a tap that is in progress on it.
   const nav = $('#nav-leading');
-  if (nav) nav.innerHTML = syncButtonHtml();
+  const navHtml = syncButtonHtml();
+  if (nav && nav.dataset.html !== navHtml) { nav.innerHTML = navHtml; nav.dataset.html = navHtml; }
   const el = $('#sync-status');
-  if (el) el.innerHTML = syncStatusHtml();
+  const statusHtml = syncStatusHtml();
+  if (el && el.dataset.html !== statusHtml) { el.innerHTML = statusHtml; el.dataset.html = statusHtml; }
   // The board's notices (a failure, an update to import) change only when the page is free.
   const e = syncState.error;
   const key = `${syncOn() && e && e.code !== 'offline' ? e.message : ''}|${syncFlags().news ? syncCfg.sha : ''}`;
@@ -1793,7 +1796,9 @@ function renderChrome() {
     files: '',
   };
   $('#nav-actions').innerHTML = actions[view];
-  $('#nav-leading').innerHTML = syncButtonHtml();
+  const navHtml = syncButtonHtml();
+  $('#nav-leading').innerHTML = navHtml;
+  $('#nav-leading').dataset.html = navHtml;
 }
 
 function render() {
@@ -1949,6 +1954,8 @@ document.addEventListener('click', async e => {
     }
     case 'send': sendToDevice(); break;
     case 'sync-setup': syncSetup(); break;
+    case 'sync-share': syncShare(); break;
+    case 'sync-off': syncOff(); break;
     case 'sync-menu': syncMenu(actEl); break;
     case 'sync-push': runSync('push', { manual: true }); break;
     case 'sync-pull': runSync('pull', { manual: true }); break;
@@ -2088,7 +2095,12 @@ document.addEventListener('toggle', e => { if (e.target.id === 'filters-box') fi
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { flush(); if (syncAuto() && syncFlags().unsaved) runSync('both'); } else scheduleSync(syncAuto() ? 'both' : 'check', 300);
 });
-window.addEventListener('resize', closeMenu);
+// Phones change the height whenever the browser's bar slides in or out; only a new width moves the menu's anchor.
+let lastWidth = window.innerWidth;
+window.addEventListener('resize', () => {
+  if (window.innerWidth !== lastWidth) closeMenu();
+  lastWidth = window.innerWidth;
+});
 // The bar firms into a band once content scrolls beneath it.
 const navbar = $('#navbar');
 const onScroll = () => {
